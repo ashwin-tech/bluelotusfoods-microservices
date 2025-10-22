@@ -49,3 +49,7 @@ app.include_router(vendors.router, prefix="/vendors", tags=["Vendors"])
 app.include_router(fish.router, prefix="/fish", tags=["Fish"])
 app.include_router(quotes.router, prefix="/quotes", tags=["Quotes"])
 app.include_router(email.router, prefix="/quotes", tags=["Email"])
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "bluelotusfoods-api"}

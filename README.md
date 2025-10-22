@@ -39,13 +39,29 @@ pip install -r requirements.txt
 
 ### Configuration
 
-Copy and configure environment files:
-```bash
-# Main API
-cp bluelotusfoods-api/.env.example bluelotusfoods-api/.env
+Create a `.env` file in each service folder (used for local development only). Do not commit these files.
 
-# Email Service  
-cp bluelotusfoods-email/.env.example bluelotusfoods-email/.env
+bluelotusfoods-api/.env (example):
+```
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_NAME=bluelotusfoods
+DB_USER=postgres
+DB_PASSWORD=postgres
+EMAIL_SERVICE_URL=http://localhost:8001
+# JSON array for CORS origins
+CORS_ALLOW_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
+```
+
+bluelotusfoods-email/.env (example):
+```
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your_email@gmail.com
+SMTP_PASSWORD=your_app_password
+FROM_EMAIL=noreply@thebluelotusfoods.com
+FROM_NAME=Blue Lotus Foods
+EMAIL_SIMULATION_MODE=true
 ```
 
 ### Running Services
