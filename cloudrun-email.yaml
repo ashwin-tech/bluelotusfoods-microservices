@@ -1,0 +1,68 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: bluelotusfoods-email
+  labels:
+    cloud.googleapis.com/location: us-central1
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress-status: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: '0'
+        autoscaling.knative.dev/maxScale: '5'
+        run.googleapis.com/cpu-throttling: 'true'
+        run.googleapis.com/startup-cpu-boost: 'true'
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      serviceAccountName: PROJECT_ID-compute@developer.gserviceaccount.com
+      containers:
+      - name: bluelotusfoods-email
+        image: us-central1-docker.pkg.dev/PROJECT_ID/bluelotusfoods/bluelotusfoods-email:latest
+        ports:
+        - name: http1
+          containerPort: 8001
+        env:
+        - name: SMTP_SERVER
+          value: "smtp.gmail.com"
+        - name: SMTP_PORT
+          value: "587"
+        - name: SMTP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: smtp-username
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: smtp-password
+        - name: FROM_EMAIL
+          value: "noreply@thebluelotusfoods.com"
+        - name: FROM_NAME
+          value: "Blue Lotus Foods"
+        - name: EMAIL_SIMULATION_MODE
+          value: "false"
+        resources:
+          limits:
+            cpu: '1'
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 0
+          periodSeconds: 5
+          failureThreshold: 10
+  traffic:
+  - percent: 100
+    latestRevision: true
