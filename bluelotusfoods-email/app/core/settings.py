@@ -13,15 +13,15 @@ class Settings(BaseSettings):
     from_name: str
     
     # Email Configuration
-    email_simulation_mode: bool = False  # Set to True to simulate email sending without actual SMTP
+    email_simulation_mode: bool  # Set to True to simulate email sending without actual SMTP
     
     # Service Configuration
-    debug: bool = False
-    log_level: str = "INFO"
+    debug: bool
+    log_level: str
     
     # API Configuration
-    api_host: str = "0.0.0.0"
-    api_port: int = 8001
+    api_host: str
+    api_port: int
     
     class Config:
         env_file = ".env"

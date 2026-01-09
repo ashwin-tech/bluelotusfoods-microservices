@@ -31,7 +31,7 @@ class Quote(BaseModel):
     destinations: List[Destination]
     products: List[Product]
 
-@router.post("/")
+@router.post("")
 def create_quote(quote: Quote):
     conn = get_connection()
     try:

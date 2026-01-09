@@ -4,26 +4,25 @@ from typing import List, Optional
 
 class Settings(BaseSettings):
     # Database Configuration
-    db_name: str = "postgres"
-    db_user: str = "postgres"
-    db_password: str = "postgres"
-    db_host: str = "127.0.0.1"
-    db_port: int = 5432
+    db_name: str
+    db_user: str
+    db_password: str
+    db_host: str
+    db_port: int
     
-    # CORS Configuration - defaults for local development
-    # In production, override via CORS_ORIGINS environment variable (comma-separated)
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://192.168.1.68:5173"
-    cors_allow_credentials: bool = True
-    cors_allow_methods: List[str] = ["*"]
-    cors_allow_headers: List[str] = ["*"]
+    # CORS Configuration - comma-separated origins
+    cors_origins: str
+    cors_allow_credentials: bool
+    cors_allow_methods: List[str]
+    cors_allow_headers: List[str]
     
     # API Configuration
-    api_host: str = "0.0.0.0"
-    api_port: int = 8000
-    debug: bool = False
+    api_host: str
+    api_port: int
+    debug: bool
     
     # External Services
-    email_service_url: str = "http://localhost:8001"
+    email_service_url: str
     
     class Config:
         env_file = ".env"
