@@ -22,3 +22,6 @@ httpx==0.25.2
 
 # Logging
 structlog==23.2.0
+
+# Timezone support
+pytz==2023.3

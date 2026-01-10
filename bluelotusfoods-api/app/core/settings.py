@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     
     # External Services
     email_service_url: str
+    quote_notification_email: str
     
     class Config:
         env_file = ".env"

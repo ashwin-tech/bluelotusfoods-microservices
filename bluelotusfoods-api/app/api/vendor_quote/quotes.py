@@ -4,7 +4,11 @@ from app.db.queries import DatabaseQueries
 from psycopg2.extras import RealDictCursor
 from pydantic import BaseModel
 from typing import List
+import httpx
+import logging
+from app.core.settings import settings
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 class Destination(BaseModel):
@@ -32,7 +36,7 @@ class Quote(BaseModel):
     products: List[Product]
 
 @router.post("")
-def create_quote(quote: Quote):
+async def create_quote(quote: Quote):
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -95,7 +99,50 @@ def create_quote(quote: Quote):
                 )
 
             conn.commit()
-            return {"message": "Quote created successfully", "quote_id": quote.id, "id": quote.id}
+            
+            # Send email notifications asynchronously
+            # 1. Send vendor confirmation email (to vendor)
+            # 2. Send owner notification email (to sales team)
+            email_results = {"vendor_email": None, "owner_email": None}
+            
+            try:
+                async with httpx.AsyncClient() as client:
+                    # Send vendor confirmation email
+                    try:
+                        logger.info(f"Triggering vendor confirmation email for quote {quote.id}")
+                        vendor_email_response = await client.post(
+                            f"http://localhost:8000/quotes/{quote.id}/email",
+                            timeout=10.0
+                        )
+                        logger.info(f"Vendor confirmation email response: {vendor_email_response.status_code}")
+                        email_results["vendor_email"] = vendor_email_response.status_code
+                    except Exception as vendor_error:
+                        logger.error(f"Vendor confirmation email error for quote {quote.id}: {str(vendor_error)}")
+                        email_results["vendor_email"] = f"error: {str(vendor_error)}"
+                    
+                    # Send owner notification email
+                    try:
+                        logger.info(f"Triggering owner notification email for quote {quote.id}")
+                        owner_email_response = await client.post(
+                            f"http://localhost:8000/quotes/{quote.id}/owner-notification",
+                            timeout=10.0
+                        )
+                        logger.info(f"Owner notification email response: {owner_email_response.status_code}")
+                        email_results["owner_email"] = owner_email_response.status_code
+                    except Exception as owner_error:
+                        logger.error(f"Owner notification email error for quote {quote.id}: {str(owner_error)}")
+                        email_results["owner_email"] = f"error: {str(owner_error)}"
+                    
+            except Exception as email_error:
+                # Log email errors but don't fail the quote creation
+                logger.error(f"Email notification error for quote {quote.id}: {str(email_error)}")
+            
+            return {
+                "message": "Quote created successfully", 
+                "quote_id": quote.id, 
+                "id": quote.id,
+                "email_status": email_results
+            }
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=f"Error creating quote: {str(e)}")
