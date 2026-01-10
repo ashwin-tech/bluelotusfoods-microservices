@@ -8,6 +8,13 @@ class VendorQuoteEmailRequest(BaseModel):
     vendor_email: EmailStr
     vendor_name: str
     quote_data: dict  # The quote details from the database
+
+
+class OwnerNotificationEmailRequest(BaseModel):
+    quote_id: int
+    owner_email: EmailStr
+    vendor_name: str
+    quote_data: dict  # The quote details from the database
     
 
 class EmailResponse(BaseModel):
