@@ -16,12 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Expose default port (Render sets $PORT at runtime)
-EXPOSE 8000
-
-# Health check
+# Health check - use PORT env var
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+    CMD curl -f http://localhost:$PORT/health || exit 1
 
-# Run the application
-CMD ["sh", "-lc", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Run the application - PORT is set by Cloud Run
+CMD uvicorn app.main:app --host 0.0.0.0 --port $PORT
