@@ -42,7 +42,21 @@ spec:
         - name: EMAIL_SERVICE_URL
           value: "https://bluelotusfoods-email-PROJECT_ID.a.run.app"
         - name: CORS_ORIGINS
-          value: '["https://www.thebluelotusfoods.com"]'
+          value: 'https://www.thebluelotusfoods.com,https://thebluelotusfoods.com,https://quotes.thebluelotusfoods.com'
+        - name: CORS_ALLOW_CREDENTIALS
+          value: "true"
+        - name: CORS_ALLOW_METHODS
+          value: '["GET","POST","PUT","DELETE","OPTIONS","PATCH"]'
+        - name: CORS_ALLOW_HEADERS
+          value: '["*"]'
+        - name: API_HOST
+          value: "0.0.0.0"
+        - name: API_PORT
+          value: "8000"
+        - name: DEBUG
+          value: "false"
+        - name: QUOTE_NOTIFICATION_EMAIL
+          value: "sales@thebluelotusfoods.com"
         resources:
           limits:
             cpu: '1'
