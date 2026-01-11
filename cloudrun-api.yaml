@@ -50,13 +50,11 @@ spec:
         livenessProbe:
           httpGet:
             path: /health
-            port: 8000
           initialDelaySeconds: 10
           periodSeconds: 10
         startupProbe:
           httpGet:
             path: /health
-            port: 8000
           initialDelaySeconds: 0
           periodSeconds: 5
           failureThreshold: 10

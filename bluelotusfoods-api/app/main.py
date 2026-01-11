@@ -8,14 +8,23 @@ from app.core.settings import settings
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    init_db_pool()
-    print("Database pool initialized ✅")
-
+    try:
+        print("🚀 Starting Blue Lotus Foods API...")
+        init_db_pool()
+        print("✅ Database pool initialized")
+    except Exception as e:
+        print(f"❌ Failed to initialize database pool: {e}")
+        # Don't raise - allow app to start even if DB is unavailable
+        # DB errors will be caught per-request
+    
     yield 
 
     # Shutdown
-    close_db_pool()
-    print("Database pool closed 🛑")
+    try:
+        close_db_pool()
+        print("🛑 Database pool closed")
+    except Exception as e:
+        print(f"⚠️ Error closing database pool: {e}")
 
 app = FastAPI(title="Blue Lotus Foods API", lifespan=lifespan)
 

@@ -53,13 +53,11 @@ spec:
         livenessProbe:
           httpGet:
             path: /health
-            port: 8001
           initialDelaySeconds: 10
           periodSeconds: 10
         startupProbe:
           httpGet:
             path: /health
-            port: 8001
           initialDelaySeconds: 0
           periodSeconds: 5
           failureThreshold: 10
