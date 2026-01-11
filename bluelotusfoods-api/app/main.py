@@ -4,27 +4,39 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.db.db import init_db_pool,close_db_pool
 from app.core.settings import settings
+import os
+import sys
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     try:
-        print("🚀 Starting Blue Lotus Foods API...")
+        print("=" * 60, flush=True)
+        print("🚀 Starting Blue Lotus Foods API...", flush=True)
+        print(f"📍 Python version: {sys.version}", flush=True)
+        print(f"🔌 PORT environment variable: {os.environ.get('PORT', 'NOT SET')}", flush=True)
+        print(f"💾 Database host: {settings.db_host}", flush=True)
+        print(f"📧 Email service URL: {settings.email_service_url}", flush=True)
+        print("=" * 60, flush=True)
+        
         init_db_pool()
-        print("✅ Database pool initialized")
+        print("✅ Database pool initialized successfully", flush=True)
     except Exception as e:
-        print(f"❌ Failed to initialize database pool: {e}")
+        print(f"❌ Failed to initialize database pool: {e}", flush=True)
+        print(f"⚠️  Continuing startup without database connection", flush=True)
         # Don't raise - allow app to start even if DB is unavailable
         # DB errors will be caught per-request
     
+    print("✅ Application startup complete - ready to accept requests", flush=True)
     yield 
 
     # Shutdown
     try:
+        print("🛑 Shutting down Blue Lotus Foods API...", flush=True)
         close_db_pool()
-        print("🛑 Database pool closed")
+        print("✅ Database pool closed", flush=True)
     except Exception as e:
-        print(f"⚠️ Error closing database pool: {e}")
+        print(f"⚠️ Error closing database pool: {e}", flush=True)
 
 app = FastAPI(title="Blue Lotus Foods API", lifespan=lifespan)
 
@@ -61,4 +73,9 @@ app.include_router(email.router, prefix="/quotes", tags=["Email"])
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "bluelotusfoods-api"}
+    """Health check endpoint for Cloud Run probes"""
+    return {
+        "status": "healthy", 
+        "service": "bluelotusfoods-api",
+        "port": os.environ.get('PORT', 'unknown')
+    }

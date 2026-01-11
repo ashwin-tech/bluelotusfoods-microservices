@@ -4,6 +4,17 @@ from app.api.email import router as email_router
 from app.api.test import router as test_router
 from app.core.settings import settings
 import structlog
+import os
+import sys
+
+# Print startup information
+print("=" * 60, flush=True)
+print("🚀 Starting Blue Lotus Foods Email Service...", flush=True)
+print(f"📍 Python version: {sys.version}", flush=True)
+print(f"🔌 PORT environment variable: {os.environ.get('PORT', 'NOT SET')}", flush=True)
+print(f"📧 SMTP Server: {settings.smtp_server}", flush=True)
+print(f"🎭 Email simulation mode: {settings.email_simulation_mode}", flush=True)
+print("=" * 60, flush=True)
 
 # Configure structured logging
 structlog.configure(
@@ -53,4 +64,9 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "bluelotusfoods-email"}
+    """Health check endpoint for Cloud Run probes"""
+    return {
+        "status": "healthy", 
+        "service": "bluelotusfoods-email",
+        "port": os.environ.get('PORT', 'unknown')
+    }

@@ -55,12 +55,14 @@ spec:
             path: /health
           initialDelaySeconds: 10
           periodSeconds: 10
+          timeoutSeconds: 5
         startupProbe:
           httpGet:
             path: /health
           initialDelaySeconds: 0
           periodSeconds: 5
-          failureThreshold: 10
+          failureThreshold: 30
+          timeoutSeconds: 5
   traffic:
   - percent: 100
     latestRevision: true
