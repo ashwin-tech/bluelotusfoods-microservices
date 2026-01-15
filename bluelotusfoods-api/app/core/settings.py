@@ -1,5 +1,7 @@
 from pydantic_settings import BaseSettings
-from typing import List, Optional
+from pydantic import field_validator
+from typing import List, Optional, Union
+import json
 
 
 class Settings(BaseSettings):
@@ -13,8 +15,8 @@ class Settings(BaseSettings):
     # CORS Configuration - comma-separated origins
     cors_origins: str
     cors_allow_credentials: bool
-    cors_allow_methods: List[str]
-    cors_allow_headers: List[str]
+    cors_allow_methods: Union[str, List[str]]
+    cors_allow_headers: Union[str, List[str]]
     
     # API Configuration
     api_host: str
@@ -24,6 +26,18 @@ class Settings(BaseSettings):
     # External Services
     email_service_url: str
     quote_notification_email: str
+    
+    @field_validator('cors_allow_methods', 'cors_allow_headers', mode='before')
+    @classmethod
+    def parse_json_list(cls, v):
+        """Parse JSON string to list if needed"""
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                # If it's not valid JSON, split by comma as fallback
+                return [item.strip() for item in v.split(',')]
+        return v
     
     class Config:
         env_file = ".env"
