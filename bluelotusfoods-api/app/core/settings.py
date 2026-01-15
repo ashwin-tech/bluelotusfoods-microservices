@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     # API Configuration
     api_host: str
     api_port: int
-    debug: bool
     
     # External Services
     email_service_url: str
@@ -42,6 +41,8 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        case_sensitive = False  # Allow case-insensitive environment variable matching
+        extra = "ignore"  # Ignore extra environment variables not in the model
     
     @property
     def cors_allow_origins(self) -> List[str]:
