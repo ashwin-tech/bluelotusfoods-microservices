@@ -46,7 +46,7 @@ spec:
         - name: CORS_ALLOW_CREDENTIALS
           value: "true"
         - name: CORS_ALLOW_METHODS
-          value: '["GET","POST","PUT","DELETE","OPTIONS","PATCH"]'
+          value: '["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"]'
         - name: CORS_ALLOW_HEADERS
           value: '["*"]'
         - name: API_HOST
