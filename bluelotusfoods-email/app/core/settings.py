@@ -15,16 +15,10 @@ class Settings(BaseSettings):
     # Email Configuration
     email_simulation_mode: bool  # Set to True to simulate email sending without actual SMTP
     
-    # Service Configuration
-    debug: bool
-    log_level: str
-    
-    # API Configuration
-    api_host: str
-    api_port: int
-    
     class Config:
         env_file = ".env"
+        case_sensitive = False  # Allow case-insensitive environment variable matching
+        extra = "ignore"  # Ignore extra environment variables not in the model
 
 
 settings = Settings()
