@@ -18,7 +18,7 @@ spec:
     spec:
       containerConcurrency: 80
       timeoutSeconds: 300
-      serviceAccountName: PROJECT_ID-compute@developer.gserviceaccount.com
+      serviceAccountName: project-42ebf497-3f40-4b15-a7c-compute@developer.gserviceaccount.com
       containers:
       - name: bluelotusfoods-email
         image: us-central1-docker.pkg.dev/PROJECT_ID/bluelotusfoods/bluelotusfoods-email:latest

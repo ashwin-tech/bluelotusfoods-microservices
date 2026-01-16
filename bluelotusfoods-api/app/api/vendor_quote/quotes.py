@@ -105,13 +105,16 @@ async def create_quote(quote: Quote):
             # 2. Send owner notification email (to sales team)
             email_results = {"vendor_email": None, "owner_email": None}
             
+            # Construct base URL - use localhost for local dev, actual host for Cloud Run
+            base_url = f"http://{settings.api_host}:{settings.api_port}"
+            
             try:
                 async with httpx.AsyncClient() as client:
                     # Send vendor confirmation email
                     try:
                         logger.info(f"Triggering vendor confirmation email for quote {quote.id}")
                         vendor_email_response = await client.post(
-                            f"http://localhost:8000/quotes/{quote.id}/email",
+                            f"{base_url}/quotes/{quote.id}/email",
                             timeout=10.0
                         )
                         logger.info(f"Vendor confirmation email response: {vendor_email_response.status_code}")
@@ -124,7 +127,7 @@ async def create_quote(quote: Quote):
                     try:
                         logger.info(f"Triggering owner notification email for quote {quote.id}")
                         owner_email_response = await client.post(
-                            f"http://localhost:8000/quotes/{quote.id}/owner-notification",
+                            f"{base_url}/quotes/{quote.id}/owner-notification",
                             timeout=10.0
                         )
                         logger.info(f"Owner notification email response: {owner_email_response.status_code}")
