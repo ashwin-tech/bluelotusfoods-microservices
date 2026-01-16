@@ -18,7 +18,7 @@ spec:
     spec:
       containerConcurrency: 80
       timeoutSeconds: 300
-      serviceAccountName: PROJECT_ID-compute@developer.gserviceaccount.com
+      serviceAccountName: project-42ebf497-3f40-4b15-a7c-compute@developer.gserviceaccount.com
       containers:
       - name: bluelotusfoods-api
         image: us-central1-docker.pkg.dev/PROJECT_ID/bluelotusfoods/bluelotusfoods-api:latest
@@ -40,7 +40,7 @@ spec:
               key: latest
               name: db-password
         - name: EMAIL_SERVICE_URL
-          value: "https://bluelotusfoods-email-PROJECT_ID.a.run.app"
+          value: "https://email.thebluelotusfoods.com"
         - name: CORS_ORIGINS
           value: 'https://www.thebluelotusfoods.com,https://thebluelotusfoods.com,https://quotes.thebluelotusfoods.com'
         - name: CORS_ALLOW_CREDENTIALS
