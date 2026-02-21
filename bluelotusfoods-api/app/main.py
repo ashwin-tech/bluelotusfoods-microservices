@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from app.api.vendor_quote import dictionary, vendors, fish, quotes, email
+from app.api import buyer_pricing
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.db.db import init_db_pool,close_db_pool
@@ -60,7 +61,8 @@ async def root():
             "dictionary": "/dictionary",
             "vendors": "/vendors",
             "fish": "/fish",
-            "quotes": "/quotes"
+            "quotes": "/quotes",
+            "buyer_pricing": "/buyer-pricing"
         }
     }
 
@@ -70,6 +72,7 @@ app.include_router(vendors.router, prefix="/vendors", tags=["Vendors"])
 app.include_router(fish.router, prefix="/fish", tags=["Fish"])
 app.include_router(quotes.router, prefix="/quotes", tags=["Quotes"])
 app.include_router(email.router, prefix="/quotes", tags=["Email"])
+app.include_router(buyer_pricing.router, prefix="/buyer-pricing", tags=["Buyer Pricing"])
 
 @app.get("/health")
 async def health_check():

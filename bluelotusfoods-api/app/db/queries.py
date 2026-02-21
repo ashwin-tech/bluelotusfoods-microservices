@@ -171,6 +171,145 @@ INSERT_EMAIL_LOG = """
     VALUES (%s, %s, %s, NOW())
 """
 
+# =====================================================
+# BUYER PRICING QUERIES
+# =====================================================
+
+# Buyer queries
+GET_ALL_BUYERS = """
+    SELECT 
+        b.id,
+        b.name,
+        b.email,
+        b.role,
+        b.phone,
+        b.is_email_enabled,
+        b.is_message_enabled,
+        b.active,
+        c.id as company_id,
+        c.name as company_name,
+        c.address as company_address
+    FROM buyers b
+    JOIN company c ON b.company_id = c.id
+    WHERE b.active = true
+    ORDER BY c.name, b.name
+"""
+
+GET_BUYER_BY_ID = """
+    SELECT 
+        b.id,
+        b.name,
+        b.email,
+        b.role,
+        b.phone,
+        b.company_id,
+        b.is_email_enabled,
+        b.is_message_enabled,
+        b.active,
+        c.name as company_name,
+        c.address as company_address,
+        c.phone as company_phone
+    FROM buyers b
+    JOIN company c ON b.company_id = c.id
+    WHERE b.id = %s AND b.active = true
+"""
+
+GET_COMPANY_PORTS = """
+    SELECT 
+        d.id,
+        d.code,
+        d.name,
+        d.description
+    FROM company_ports cp
+    JOIN dictionary d ON cp.port_id = d.id
+    WHERE cp.company_id = %s AND d.active = true
+    ORDER BY d.name
+"""
+
+GET_BUYERS_BY_COMPANY = """
+    SELECT 
+        b.id,
+        b.name,
+        b.email,
+        b.role,
+        b.phone,
+        b.is_email_enabled,
+        b.is_message_enabled,
+        b.active,
+        b.company_id,
+        c.name as company_name
+    FROM buyers b
+    JOIN company c ON b.company_id = c.id
+    WHERE b.company_id = %s AND b.active = true
+    ORDER BY b.name
+"""
+
+# Vendor queries for buyer pricing
+GET_ALL_VENDORS = """
+    SELECT 
+        id,
+        code as vendor_code,
+        name,
+        country as vendor_address,
+        contact_email as vendor_email,
+        active
+    FROM vendors
+    WHERE active = true
+    ORDER BY name
+"""
+
+# Estimate queries
+SEARCH_ESTIMATES_BASE = """
+    SELECT 
+        q.id as quote_id,
+        q.created_at as quote_date,
+        d.name as port,
+        fs.common_name as fish,
+        fc.name as cut,
+        fg.name as grade,
+        qp.weight_range as fish_size,
+        qp.price_per_kg,
+        qd.airfreight_per_kg,
+        v.vendor_name,
+        v.vendor_code
+    FROM quote q
+    JOIN quote_destination qd ON q.id = qd.quote_id
+    JOIN dictionary d ON qd.destination_id = d.id
+    JOIN quote_product qp ON q.id = qp.quote_id
+    JOIN fish_species fs ON qp.fish_id = fs.id
+    JOIN fish_cut fc ON qp.cut = fc.id
+    JOIN fish_grade fg ON qp.grade = fg.id
+    JOIN vendor v ON q.vendor_id = v.id
+    WHERE 1=1
+"""
+
+GET_BUYER_ESTIMATES = """
+    SELECT 
+        q.id as quote_id,
+        q.created_at as quote_date,
+        d.name as port,
+        fs.common_name as fish,
+        fc.name as cut,
+        fg.name as grade,
+        qp.weight_range as fish_size,
+        qp.price_per_kg,
+        qd.airfreight_per_kg,
+        v.vendor_name,
+        v.vendor_code
+    FROM quote q
+    JOIN quote_destination qd ON q.id = qd.quote_id
+    JOIN dictionary d ON qd.destination_id = d.id
+    JOIN quote_product qp ON q.id = qp.quote_id
+    JOIN fish_species fs ON qp.fish_id = fs.id
+    JOIN fish_cut fc ON qp.cut = fc.id
+    JOIN fish_grade fg ON qp.grade = fg.id
+    JOIN vendor v ON q.vendor_id = v.id
+    JOIN company_ports cp ON d.id = cp.port_id
+    JOIN buyers b ON cp.company_id = b.company_id
+    WHERE b.id = %s
+    ORDER BY q.created_at DESC
+"""
+
 
 # =====================================================
 # GENERIC QUERY MANAGER CLASS
@@ -224,6 +363,17 @@ class DatabaseQueries:
         'get_vendor_quote': GET_VENDOR_QUOTE_FOR_EMAIL
     }
     
+    # Buyer pricing queries
+    BUYER_PRICING = {
+        'get_all_buyers': GET_ALL_BUYERS,
+        'get_buyer_by_id': GET_BUYER_BY_ID,
+        'get_company_ports': GET_COMPANY_PORTS,
+        'get_buyers_by_company': GET_BUYERS_BY_COMPANY,
+        'get_all_vendors': GET_ALL_VENDORS,
+        'search_estimates_base': SEARCH_ESTIMATES_BASE,
+        'get_buyer_estimates': GET_BUYER_ESTIMATES
+    }
+    
 
     
     @classmethod
@@ -235,7 +385,8 @@ class DatabaseQueries:
             'dictionary': cls.DICTIONARY,
             'fish': cls.FISH,
             'quotes': cls.QUOTES,
-            'email': cls.EMAIL
+            'email': cls.EMAIL,
+            'buyer_pricing': cls.BUYER_PRICING
         }
 
 
