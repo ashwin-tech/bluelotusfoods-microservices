@@ -53,3 +53,79 @@ class VendorQuoteData(BaseModel):
     price_negotiable: bool = False
     exclusive_offer: bool = False
     created_at: datetime
+
+class BuyerEstimateItem(BaseModel):
+    vendor_name: str
+    common_name: str
+    scientific_name: Optional[str] = None
+    cut: str
+    grade: str
+    fish_size: Optional[str] = None
+    port: str
+    offer_quantity: float  # Weight in LBS
+    fish_price: float
+    margin: float
+    freight_price: float
+    tariff_percent: float
+    clearing_charges: float  # Clearing charges
+    total_price: float
+    fish_species_id: int
+    cut_id: int
+    grade_id: int
+
+
+class BuyerPricingEmailRequest(BaseModel):
+    buyer_emails: List[EmailStr]
+    buyer_name: str
+    company_name: str
+    estimate_number: str
+    items: List[BuyerEstimateItem]
+    delivery_date_from: Optional[str] = None
+    delivery_date_to: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class OwnerEstimateNotificationRequest(BaseModel):
+    owner_email: EmailStr
+    company_name: str
+    estimate_number: str
+    items: List[BuyerEstimateItem]
+    delivery_date_from: Optional[str] = None
+    delivery_date_to: Optional[str] = None
+
+
+# ─── BPL Email Schemas ───────────────────────────────
+
+class BPLPiece(BaseModel):
+    piece_number: int
+    weight_kg: float
+
+class BPLBox(BaseModel):
+    box_number: int
+    num_pieces: int
+    net_weight_kg: float
+    pieces: List[BPLPiece] = []
+
+class BPLItem(BaseModel):
+    """One PO line item with its boxes"""
+    fish_name: str
+    cut_name: str
+    grade_name: str
+    fish_size: Optional[str] = None
+    order_weight_kg: float
+    boxes: List[BPLBox] = []
+
+class SendBPLEmailRequest(BaseModel):
+    owner_email: str
+    vendor_email: str
+    vendor_name: str
+    vendor_country: Optional[str] = None
+    po_number: str
+    port_code: str
+    invoice_number: Optional[str] = None
+    air_way_bill: Optional[str] = None
+    packed_date: Optional[str] = None
+    expiry_date: Optional[str] = None
+    total_boxes: int = 0
+    notes: Optional[str] = None
+    items: List[BPLItem]

@@ -1,13 +1,15 @@
 from fastapi import APIRouter, HTTPException
 from app.db.db import get_connection, release_connection
 from app.services.pricing_calculations import calculate_estimate_totals
-from app.services.pdf_generator import generate_estimate_pdf, get_pdf_filename
 from psycopg2.extras import RealDictCursor
 from pydantic import BaseModel
 from typing import List, Optional
 from decimal import Decimal
 from datetime import date
 import logging
+import httpx
+import os
+from app.core.settings import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -19,6 +21,7 @@ class EstimateItemToSave(BaseModel):
     Vendor quotes are in KG but converted to LBS on the frontend before saving.
     """
     vendor_id: int
+    quote_id: Optional[int] = None  # Original vendor quote ID for PO traceability
     port_code: str
     fish_species_id: int
     cut_id: int
@@ -69,13 +72,12 @@ async def save_buyer_estimate(request: SaveBuyerEstimateRequest):
             # Start transaction
             cur.execute("BEGIN")
             
-            # Generate estimate number: EST-YYYY-NNN
-            cur.execute("SELECT NEXTVAL('buyer_estimate_number_seq')")
-            seq_num = cur.fetchone()['nextval']
             from datetime import datetime
-            estimate_number = f"EST-{datetime.now().year}-{seq_num:04d}"
+            now = datetime.now()
             
-            # Insert buyer_estimate header
+            # Step 1: INSERT with placeholder — let PostgreSQL assign the id via SERIAL.
+            # Step 2: Use the RETURNING id to build EST-YYYY-MM-<id>, then UPDATE.
+            # This is concurrency-safe (unlike SELECT MAX(id)+1 which has race conditions).
             cur.execute("""
                 INSERT INTO buyer_estimate (
                     estimate_number,
@@ -86,13 +88,12 @@ async def save_buyer_estimate(request: SaveBuyerEstimateRequest):
                     delivery_date_to,
                     status
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, 'draft'
+                    'PENDING', %s, %s, %s, %s, %s, 'draft'
                 )
                 RETURNING id, estimate_date, delivery_date_from, delivery_date_to, created_at
             """, (
-                estimate_number,
                 request.company_id,
-                request.buyer_ids or str(request.buyer_id),  # Use buyer_ids if provided, otherwise use buyer_id
+                request.buyer_ids or str(request.buyer_id),
                 request.notes,
                 request.delivery_date_from,
                 request.delivery_date_to
@@ -102,6 +103,13 @@ async def save_buyer_estimate(request: SaveBuyerEstimateRequest):
             estimate_id = result['id']
             estimate_date = result['estimate_date']
             created_at = result['created_at']
+            
+            # Generate estimate_number: EST-YYYY-MM-<id>
+            estimate_number = f"EST-{now.year}-{now.month:02d}-{estimate_id}"
+            cur.execute(
+                "UPDATE buyer_estimate SET estimate_number = %s WHERE id = %s",
+                (estimate_number, estimate_id)
+            )
             
             # Insert estimate items
             for item in request.items:
@@ -123,6 +131,7 @@ async def save_buyer_estimate(request: SaveBuyerEstimateRequest):
                     INSERT INTO buyer_estimate_item (
                         buyer_estimate_id,
                         vendor_id,
+                        quote_id,
                         port_code,
                         fish_species_id,
                         cut_id,
@@ -138,11 +147,12 @@ async def save_buyer_estimate(request: SaveBuyerEstimateRequest):
                         offer_quantity,
                         total_price
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                 """, (
                     estimate_id,
                     item.vendor_id,
+                    item.quote_id,
                     item.port_code,
                     item.fish_species_id,
                     item.cut_id,
@@ -180,6 +190,27 @@ async def save_buyer_estimate(request: SaveBuyerEstimateRequest):
             
             conn.commit()
             
+            # Fetch the saved items with all details for email
+            cur.execute("""
+                SELECT 
+                    bei.*,
+                    v.name as vendor_name,
+                    fs.common_name,
+                    fs.scientific_name,
+                    fc.name as cut,
+                    fg.name as grade,
+                    bei.port_code as port
+                FROM buyer_estimate_item bei
+                JOIN vendors v ON bei.vendor_id = v.id
+                JOIN fish_species fs ON bei.fish_species_id = fs.id
+                JOIN fish_cut fc ON bei.cut_id = fc.id
+                JOIN fish_grade fg ON bei.grade_id = fg.id
+                WHERE bei.buyer_estimate_id = %s
+                ORDER BY v.name, fs.common_name
+            """, (estimate_id,))
+            
+            saved_items = cur.fetchall()
+            
             return {
                 "success": True,
                 "message": "Buyer estimate saved successfully",
@@ -195,7 +226,8 @@ async def save_buyer_estimate(request: SaveBuyerEstimateRequest):
                     "status": "draft",
                     "item_count": len(request.items),
                     "created_at": created_at.isoformat()
-                }
+                },
+                "items": [dict(item) for item in saved_items]
             }
             
     except Exception as e:
@@ -421,6 +453,7 @@ async def get_company_estimates(company_id: int, limit: int = 5):
                         bei.id,
                         bei.buyer_estimate_id,
                         bei.vendor_id,
+                        bei.quote_id,
                         v.name as vendor_name,
                         bei.port_code,
                         bei.fish_species_id,
@@ -524,25 +557,342 @@ async def send_estimate(estimate_id: int):
             
             conn.commit()
             
-            # Generate PDF
-            pdf_path = generate_estimate_pdf(
-                estimate_data=dict(estimate),
-                items=[dict(item) for item in items]
-            )
+            # Get buyer emails
+            cur.execute("""
+                SELECT email
+                FROM buyers
+                WHERE id IN (
+                    SELECT UNNEST(STRING_TO_ARRAY(%s, ',')::INTEGER[])
+                )
+                AND email IS NOT NULL
+                AND is_email_enabled = true
+            """, (estimate['buyer_ids'],))
             
-            pdf_filename = get_pdf_filename(estimate['estimate_number'])
+            buyer_emails = [row['email'] for row in cur.fetchall()]
+            
+            if not buyer_emails:
+                raise HTTPException(status_code=400, detail="No valid buyer emails found for this estimate")
+            
+            # Prepare items for email API
+            email_items = []
+            for item in items:
+                email_items.append({
+                    'vendor_name': item['vendor_name'],
+                    'common_name': item['common_name'],
+                    'scientific_name': item.get('scientific_name') or '',
+                    'cut': item['cut_name'],
+                    'grade': item['grade_name'],
+                    'fish_size': item.get('fish_size') or '',
+                    'port': item['port_code'],
+                    'offer_quantity': float(item['offer_quantity']),
+                    'fish_price': float(item['fish_price']),
+                    'margin': float(item['margin']),
+                    'freight_price': float(item['freight_price']),
+                    'tariff_percent': float(item['tariff_percent']),
+                    'clearing_charges': float(item['clearing_charges']),
+                    'total_price': float(item['total_price']),
+                    'fish_species_id': item['fish_species_id'],
+                    'cut_id': item['cut_id'],
+                    'grade_id': item['grade_id']
+                })
+            
+            # Send email via email service
+            email_api_url = os.environ.get('EMAIL_SERVICE_URL', 'http://localhost:8001')
+            async with httpx.AsyncClient() as client:
+                email_response = await client.post(
+                    f"{email_api_url}/email/buyer-pricing/send-estimate",
+                    json={
+                        'buyer_emails': buyer_emails,
+                        'buyer_name': estimate['buyer_names'],
+                        'company_name': estimate['company_name'],
+                        'estimate_number': estimate['estimate_number'],
+                        'items': email_items,
+                        'delivery_date_from': estimate.get('delivery_date_from').isoformat() if estimate.get('delivery_date_from') else None,
+                        'delivery_date_to': estimate.get('delivery_date_to').isoformat() if estimate.get('delivery_date_to') else None,
+                        'notes': estimate.get('notes')
+                    },
+                    timeout=30.0
+                )
+                
+                email_data = email_response.json()
+                
+                if not email_data.get('success'):
+                    raise HTTPException(status_code=500, detail=f"Failed to send email: {email_data.get('message')}")
+                
+                # Send owner notification (fire and forget - don't block on failure)
+                try:
+                    owner_email = settings.owner_notification_email
+                    await client.post(
+                        f"{email_api_url}/email/buyer-pricing/send-owner-notification",
+                        json={
+                            'owner_email': owner_email,
+                            'company_name': estimate['company_name'],
+                            'estimate_number': estimate['estimate_number'],
+                            'items': email_items,
+                            'delivery_date_from': estimate.get('delivery_date_from').isoformat() if estimate.get('delivery_date_from') else None,
+                            'delivery_date_to': estimate.get('delivery_date_to').isoformat() if estimate.get('delivery_date_to') else None
+                        },
+                        timeout=30.0
+                    )
+                    logger.info(f"Owner notification sent to {owner_email} for estimate {estimate['estimate_number']}")
+                except Exception as owner_err:
+                    logger.error(f"Failed to send owner notification: {str(owner_err)}")
             
             return {
                 "success": True,
-                "message": "Estimate sent successfully",
-                "pdf_filename": pdf_filename,
-                "pdf_path": pdf_path,
+                "message": f"Estimate sent successfully to {len(buyer_emails)} recipient(s)",
                 "estimate_id": estimate_id,
-                "estimate_number": estimate['estimate_number']
+                "estimate_number": estimate['estimate_number'],
+                "buyer_emails": buyer_emails
             }
             
     except Exception as e:
         logger.error(f"Error sending estimate: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error sending estimate: {str(e)}")
+    finally:
+        release_connection(conn)
+
+
+class VendorQuoteLookupRequest(BaseModel):
+    quote_ids: List[int]
+
+
+@router.post("/vendor-quotes-lookup")
+async def get_vendor_quotes_by_ids(request: VendorQuoteLookupRequest):
+    """
+    Fetch original vendor quote details for a list of quote IDs.
+    Used by the PO dialog to show original vendor quotes alongside estimate items.
+    """
+    if not request.quote_ids:
+        return {"success": True, "quotes": {}}
+
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Get quote header + vendor info
+            cur.execute("""
+                SELECT
+                    q.id as quote_id,
+                    q.vendor_id,
+                    v.name as vendor_name,
+                    v.code as vendor_code,
+                    v.contact_email as vendor_email,
+                    v.country as country_of_origin,
+                    q.quote_valid_till,
+                    q.notes,
+                    q.price_negotiable,
+                    q.exclusive_offer,
+                    q.created_at as quote_date
+                FROM quote q
+                JOIN vendors v ON q.vendor_id = v.id
+                WHERE q.id = ANY(%s)
+            """, (request.quote_ids,))
+
+            quotes_raw = cur.fetchall()
+
+            # Build a dict keyed by quote_id
+            quotes = {}
+            for q in quotes_raw:
+                qid = q['quote_id']
+                quotes[qid] = dict(q)
+                quotes[qid]['products'] = []
+                quotes[qid]['destinations'] = []
+
+            if not quotes:
+                return {"success": True, "quotes": {}}
+
+            # Get products for these quotes
+            cur.execute("""
+                SELECT
+                    qp.quote_id,
+                    fs.common_name as fish_type,
+                    fc.name as cut_name,
+                    fg.name as grade_name,
+                    qp.weight_range,
+                    qp.price_per_kg,
+                    qp.quantity
+                FROM quote_product qp
+                JOIN fish_species fs ON qp.fish_id = fs.id
+                JOIN fish_cut fc ON qp.cut = fc.id
+                JOIN fish_grade fg ON qp.grade = fg.id
+                WHERE qp.quote_id = ANY(%s)
+            """, (request.quote_ids,))
+
+            for prod in cur.fetchall():
+                qid = prod['quote_id']
+                if qid in quotes:
+                    quotes[qid]['products'].append(dict(prod))
+
+            # Get destinations for these quotes
+            cur.execute("""
+                SELECT
+                    qd.quote_id,
+                    d.name as destination,
+                    d.code as destination_code,
+                    qd.airfreight_per_kg,
+                    qd.arrival_date,
+                    qd.min_weight,
+                    qd.max_weight
+                FROM quote_destination qd
+                JOIN dictionary d ON qd.destination_id = d.id
+                WHERE qd.quote_id = ANY(%s)
+            """, (request.quote_ids,))
+
+            for dest in cur.fetchall():
+                qid = dest['quote_id']
+                if qid in quotes:
+                    quotes[qid]['destinations'].append(dict(dest))
+
+            return {"success": True, "quotes": quotes}
+
+    except Exception as e:
+        logger.error(f"Error fetching vendor quotes: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching vendor quotes: {str(e)}")
+    finally:
+        release_connection(conn)
+
+
+# =====================================================
+# PURCHASE ORDER ENDPOINTS
+# =====================================================
+
+class POItemRequest(BaseModel):
+    fish_name: str
+    cut_name: str
+    grade_name: str
+    fish_size: Optional[str] = None
+    port_code: str
+    destination_name: Optional[str] = None
+    price_per_kg: float
+    airfreight_per_kg: float
+    total_per_kg: float
+    order_weight_lbs: float
+    order_weight_kg: int
+
+
+class CreatePORequest(BaseModel):
+    quote_id: int
+    estimate_id: int
+    vendor_id: int
+    items: List[POItemRequest]
+    delivery_date_from: Optional[str] = None
+    delivery_date_to: Optional[str] = None
+
+
+@router.post("/purchase-orders/create")
+async def create_purchase_order(request: CreatePORequest):
+    """
+    Create a purchase order. PO number = PO-{quote_id}-{estimate_id}-{vendor_code}.
+    Since estimate_number = EST-YYYY-MM-{id}, the estimate_id IS the suffix.
+    Vendor code is looked up from the vendors table using vendor_id.
+    One PO per quote+estimate+vendor combination (enforced by unique constraint).
+    """
+    if not request.items:
+        raise HTTPException(status_code=400, detail="At least one PO item is required")
+
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Look up vendor_code from vendors table
+            cur.execute("SELECT code FROM vendors WHERE id = %s", (request.vendor_id,))
+            vendor_row = cur.fetchone()
+            if not vendor_row:
+                raise HTTPException(status_code=404, detail=f"Vendor {request.vendor_id} not found")
+            vendor_code = vendor_row['code']
+
+            # PO number uses estimate_id directly (matches estimate_number suffix)
+            po_number = f"PO-{request.quote_id}-{request.estimate_id}-{vendor_code}"
+
+            # Check if PO already exists
+            cur.execute(
+                "SELECT id, po_number, status FROM purchase_order WHERE quote_id = %s AND estimate_id = %s AND vendor_id = %s",
+                (request.quote_id, request.estimate_id, request.vendor_id)
+            )
+            existing = cur.fetchone()
+            if existing:
+                return {
+                    "success": False,
+                    "detail": f"PO {existing['po_number']} already exists (status: {existing['status']})",
+                    "po_number": existing['po_number'],
+                    "po_id": existing['id']
+                }
+
+            # Insert PO header
+            cur.execute("""
+                INSERT INTO purchase_order (po_number, quote_id, estimate_id, vendor_id, status, delivery_date_from, delivery_date_to)
+                VALUES (%s, %s, %s, %s, 'sent', %s, %s)
+                RETURNING id, po_number, status, created_at
+            """, (po_number, request.quote_id, request.estimate_id, request.vendor_id,
+                  request.delivery_date_from, request.delivery_date_to))
+            po_row = cur.fetchone()
+            po_id = po_row['id']
+
+            # Insert PO items
+            for item in request.items:
+                cur.execute("""
+                    INSERT INTO purchase_order_item
+                        (po_id, fish_name, cut_name, grade_name, fish_size, port_code,
+                         destination_name, price_per_kg, airfreight_per_kg, total_per_kg,
+                         order_weight_lbs, order_weight_kg)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    po_id, item.fish_name, item.cut_name, item.grade_name, item.fish_size,
+                    item.port_code, item.destination_name, item.price_per_kg,
+                    item.airfreight_per_kg, item.total_per_kg,
+                    item.order_weight_lbs, item.order_weight_kg
+                ))
+
+            conn.commit()
+
+            logger.info(f"Created PO {po_number} with {len(request.items)} items")
+            return {
+                "success": True,
+                "po_id": po_id,
+                "po_number": po_number,
+                "status": "sent",
+                "created_at": str(po_row['created_at']),
+                "item_count": len(request.items)
+            }
+
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error creating purchase order: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating purchase order: {str(e)}")
+    finally:
+        release_connection(conn)
+
+
+@router.get("/purchase-orders/by-estimate/{estimate_id}")
+async def get_pos_by_estimate(estimate_id: int):
+    """
+    Get all POs for a given estimate. Used to check PO status on the SummaryTab.
+    Returns a dict keyed by vendor_id so the frontend can quickly look up PO state.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    po.id, po.po_number, po.quote_id, po.estimate_id,
+                    po.vendor_id, po.status, po.created_at
+                FROM purchase_order po
+                WHERE po.estimate_id = %s
+                ORDER BY po.created_at DESC
+            """, (estimate_id,))
+
+            rows = cur.fetchall()
+            # Build a dict keyed by vendor_id for easy lookup
+            pos_by_vendor: dict = {}
+            for row in rows:
+                vid = row['vendor_id']
+                pos_by_vendor[vid] = dict(row)
+                # Convert datetime to string
+                pos_by_vendor[vid]['created_at'] = str(row['created_at'])
+
+            return {"success": True, "purchase_orders": pos_by_vendor}
+
+    except Exception as e:
+        logger.error(f"Error fetching POs for estimate {estimate_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         release_connection(conn)
