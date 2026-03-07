@@ -53,7 +53,7 @@ spec:
           value: "0.0.0.0"
         - name: API_PORT
           value: "8000"
-        - name: QUOTE_NOTIFICATION_EMAIL
+        - name: OWNER_NOTIFICATION_EMAIL
           value: "sales@thebluelotusfoods.com"
         resources:
           limits:

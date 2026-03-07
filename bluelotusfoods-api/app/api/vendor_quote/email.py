@@ -260,7 +260,7 @@ async def send_owner_notification(quote_id: int):
             }
             
             # Call email service for owner notification
-            owner_email = settings.quote_notification_email
+            owner_email = settings.owner_notification_email
             email_payload = {
                 "quote_id": quote_id,
                 "owner_email": owner_email,

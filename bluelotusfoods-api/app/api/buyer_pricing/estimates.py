@@ -81,12 +81,17 @@ def convert_vendor_price_to_buyer_price(estimate: dict) -> dict:
     margin_kg = Decimal(str(estimate.get('margin', 0)))
     margin_lb = margin_kg / KG_TO_LBS
     
+    # Convert offer_quantity from KG to LBS
+    offer_quantity_kg = Decimal(str(estimate.get('offer_quantity', 0)))
+    offer_quantity_lb = offer_quantity_kg * KG_TO_LBS
+    
     # Convert fish_size from kg to lbs/oz
     fish_size_lbs = convert_fish_size_to_lbs(estimate.get('fish_size'))
     
     # Return updated estimate with LB prices
     return {
         **estimate,
+        'offer_quantity': float(offer_quantity_lb),
         'fish_price': float(fish_price_lb),
         'freight_price': float(freight_price_lb),
         'margin': float(margin_lb),
@@ -142,10 +147,12 @@ async def search_estimates(request: CreateEstimateRequest):
                     fg.id as grade_id,
                     fg.name as grade,
                     qp.weight_range as fish_size,
+                    qp.quantity as offer_quantity,
                     qp.price_per_kg as fish_price,
                     qd.airfreight_per_kg as freight_price,
                     COALESCE(t.reciprocal_tariff + t.secondary_tariff, 0) as tariff_percent,
-                    0 as margin
+                    0 as margin,
+                    0 as clearing_charges
                 FROM quote q
                 JOIN vendors v ON q.vendor_id = v.id
                 LEFT JOIN tariff t ON v.country = t.country AND t.active = true

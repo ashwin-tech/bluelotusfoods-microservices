@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     
     # External Services
     email_service_url: str
-    quote_notification_email: str
+    owner_notification_email: str
     
     @field_validator('cors_allow_methods', 'cors_allow_headers', mode='before')
     @classmethod
