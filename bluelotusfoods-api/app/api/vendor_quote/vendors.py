@@ -45,9 +45,20 @@ def get_purchase_order_items(po_id: int):
             """, (po_id,))
             items = [dict(row) for row in cur.fetchall()]
 
+            # Get accepted and rejected ports for this PO
+            cur.execute("""
+                SELECT port_code, status FROM purchase_order_port_acceptance
+                WHERE po_id = %s ORDER BY port_code
+            """, (po_id,))
+            port_rows = cur.fetchall()
+            accepted_ports = [r['port_code'] for r in port_rows if r['status'] == 'accepted']
+            rejected_ports = [r['port_code'] for r in port_rows if r['status'] == 'rejected']
+
             po = dict(po_header)
             po['created_at'] = str(po_header['created_at'])
             po['items'] = items
+            po['accepted_ports'] = accepted_ports
+            po['rejected_ports'] = rejected_ports
 
             return {"success": True, "purchase_order": po}
 
@@ -86,6 +97,57 @@ class SaveBPLRequest(BaseModel):
     expiry_date: Optional[str] = None      # YYYY-MM-DD
     po_item_ids: List[int]  # which PO items are selected for this port
     boxes: List[BPLBoxItem]
+
+
+class POStatusTransitionRequest(BaseModel):
+    actor_role: str        # 'vendor', 'buyer', or 'system'
+    actor_name: str
+    actor_code: str
+    notes: Optional[str] = None
+
+
+class PortAcceptRequest(BaseModel):
+    actor_name: str
+    actor_code: str
+    notes: Optional[str] = None
+
+
+def _transition_po_status(cur, po_id: int, allowed_from: list, new_status: str,
+                           actor_role: str, actor_name: str, actor_code: str,
+                           notes: Optional[str] = None) -> str:
+    """
+    Row-locked status transition with audit trail.
+    Returns the old status. Raises HTTPException if transition is not allowed.
+    """
+    cur.execute(
+        "SELECT id, status FROM purchase_order WHERE id = %s FOR UPDATE",
+        (po_id,)
+    )
+    po = cur.fetchone()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    current_status = po['status']
+    if current_status not in allowed_from:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot transition from '{current_status}' to '{new_status}'. "
+                   f"Allowed from: {allowed_from}"
+        )
+
+    cur.execute(
+        "UPDATE purchase_order SET status = %s, updated_at = NOW() WHERE id = %s",
+        (new_status, po_id)
+    )
+    cur.execute(
+        """
+        INSERT INTO purchase_order_audit
+            (po_id, from_status, to_status, actor_role, actor_name, actor_code, notes)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (po_id, current_status, new_status, actor_role, actor_name, actor_code, notes)
+    )
+    return current_status
 
 
 @router.get("/purchase-orders/{po_id}/bpl")
@@ -182,6 +244,27 @@ def save_bpl(request: SaveBPLRequest):
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Guard: BPL creation/update only allowed when this port has been accepted
+            cur.execute(
+                "SELECT id FROM purchase_order_port_acceptance WHERE po_id = %s AND port_code = %s AND status = 'accepted'",
+                (request.po_id, request.port_code)
+            )
+            if not cur.fetchone():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Port '{request.port_code}' has not been accepted for this PO"
+                )
+            # Also guard against creating BPL on rejected/cancelled POs
+            cur.execute("SELECT status FROM purchase_order WHERE id = %s", (request.po_id,))
+            po_row = cur.fetchone()
+            if not po_row:
+                raise HTTPException(status_code=404, detail="Purchase order not found")
+            if po_row['status'] in ('rejected', 'cancelled'):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"BPL not allowed for PO with status '{po_row['status']}'"
+                )
+
             # Check if BPL already exists for this PO+port
             cur.execute("""
                 SELECT id FROM box_packaging_list
@@ -459,18 +542,50 @@ async def send_bpl_email(po_id: int, port_code: str):
             email_result = response.json()
             logger.info(f"✅ BPL email sent: {email_result}")
 
-            # 8) Update BPL status to 'sent' in DB
+            # 8) Update BPL status to 'sent' in DB, then check for auto-fulfill
             if email_result.get("success"):
                 conn2 = get_connection()
                 try:
-                    with conn2.cursor() as cur2:
+                    with conn2.cursor(cursor_factory=RealDictCursor) as cur2:
                         cur2.execute("""
                             UPDATE box_packaging_list
                             SET status = 'sent', updated_at = NOW()
                             WHERE po_id = %s AND port_code = %s
                         """, (po_id, port_code))
-                        conn2.commit()
                         logger.info(f"Updated BPL status to 'sent' for PO {po_id} port {port_code}")
+
+                        # Auto-fulfill: if all accepted ports now have a sent/completed BPL → fulfill
+                        cur2.execute(
+                            "SELECT COUNT(*) AS cnt FROM purchase_order_port_acceptance WHERE po_id = %s AND status = 'accepted'",
+                            (po_id,)
+                        )
+                        accepted_count = cur2.fetchone()['cnt']
+
+                        cur2.execute("""
+                            SELECT COUNT(*) AS cnt
+                            FROM box_packaging_list b
+                            JOIN purchase_order_port_acceptance p
+                              ON b.po_id = p.po_id AND b.port_code = p.port_code
+                            WHERE b.po_id = %s AND b.status IN ('sent', 'completed') AND p.status = 'accepted'
+                        """, (po_id,))
+                        sent_count = cur2.fetchone()['cnt']
+
+                        if accepted_count > 0 and sent_count >= accepted_count:
+                            try:
+                                _transition_po_status(
+                                    cur2, po_id,
+                                    allowed_from=['accepted'],
+                                    new_status='fulfilled',
+                                    actor_role='system',
+                                    actor_name='system',
+                                    actor_code='auto'
+                                )
+                                logger.info(f"PO {po_id} auto-fulfilled: all {accepted_count} accepted port(s) sent")
+                            except HTTPException as te:
+                                # Non-fatal: PO might already be fulfilled or in unexpected state
+                                logger.warning(f"Auto-fulfill skipped for PO {po_id}: {te.detail}")
+
+                        conn2.commit()
                 except Exception as db_err:
                     logger.error(f"Failed to update BPL status: {db_err}")
                 finally:
@@ -489,6 +604,273 @@ async def send_bpl_email(po_id: int, port_code: str):
     except Exception as e:
         import traceback
         logger.error(f"Error sending BPL email: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        release_connection(conn)
+
+
+# ─── PO Status Workflow ──────────────────────────────────────
+
+
+@router.post("/purchase-orders/{po_id}/accept")
+def accept_purchase_order(po_id: int, request: POStatusTransitionRequest):
+    """Vendor accepts a purchase order. Only allowed from 'sent' status."""
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            _transition_po_status(
+                cur, po_id,
+                allowed_from=['sent'],
+                new_status='accepted',
+                actor_role='vendor',
+                actor_name=request.actor_name,
+                actor_code=request.actor_code,
+                notes=request.notes,
+            )
+            conn.commit()
+            logger.info(f"PO {po_id} accepted by vendor {request.actor_code}")
+            return {"success": True, "po_id": po_id, "status": "accepted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error accepting PO {po_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        release_connection(conn)
+
+
+@router.post("/purchase-orders/{po_id}/reject")
+def reject_purchase_order(po_id: int, request: POStatusTransitionRequest):
+    """Vendor rejects a purchase order. Only allowed from 'sent' status."""
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            _transition_po_status(
+                cur, po_id,
+                allowed_from=['sent'],
+                new_status='rejected',
+                actor_role='vendor',
+                actor_name=request.actor_name,
+                actor_code=request.actor_code,
+                notes=request.notes,
+            )
+            conn.commit()
+            logger.info(f"PO {po_id} rejected by vendor {request.actor_code}")
+            return {"success": True, "po_id": po_id, "status": "rejected"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error rejecting PO {po_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        release_connection(conn)
+
+
+def _get_port_lists(cur, po_id: int) -> tuple:
+    """Return (accepted_ports, rejected_ports) for a PO."""
+    cur.execute(
+        "SELECT port_code, status FROM purchase_order_port_acceptance WHERE po_id = %s ORDER BY port_code",
+        (po_id,)
+    )
+    rows = cur.fetchall()
+    return (
+        [r['port_code'] for r in rows if r['status'] == 'accepted'],
+        [r['port_code'] for r in rows if r['status'] == 'rejected'],
+    )
+
+
+@router.post("/purchase-orders/{po_id}/ports/{port_code}/accept")
+def accept_port(po_id: int, port_code: str, request: PortAcceptRequest):
+    """
+    Vendor accepts a specific port. Toggleable — can flip a rejected port back to accepted.
+    Transitions PO from 'sent' → 'accepted' on first port acceptance.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, status FROM purchase_order WHERE id = %s FOR UPDATE", (po_id,)
+            )
+            po = cur.fetchone()
+            if not po:
+                raise HTTPException(status_code=404, detail="Purchase order not found")
+            if po['status'] in ('rejected', 'cancelled'):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot accept port on a '{po['status']}' PO"
+                )
+
+            # Upsert port with status = 'accepted'
+            cur.execute("""
+                INSERT INTO purchase_order_port_acceptance
+                    (po_id, port_code, status, actor_name, actor_code, notes)
+                VALUES (%s, %s, 'accepted', %s, %s, %s)
+                ON CONFLICT (po_id, port_code)
+                DO UPDATE SET status = 'accepted', actor_name = EXCLUDED.actor_name,
+                              actor_code = EXCLUDED.actor_code
+            """, (po_id, port_code, request.actor_name, request.actor_code, request.notes))
+
+            # Transition PO status based on current state
+            if po['status'] == 'sent':
+                # First acceptance — move to accepted
+                cur.execute(
+                    "UPDATE purchase_order SET status = 'accepted', updated_at = NOW() WHERE id = %s",
+                    (po_id,)
+                )
+                cur.execute("""
+                    INSERT INTO purchase_order_audit
+                        (po_id, from_status, to_status, actor_role, actor_name, actor_code, notes)
+                    VALUES (%s, 'sent', 'accepted', 'vendor', %s, %s, %s)
+                """, (po_id, request.actor_name, request.actor_code, f"Port {port_code} accepted"))
+            elif po['status'] == 'fulfilled':
+                # New port accepted after fulfill — revert to accepted (new port has no BPL yet)
+                cur.execute(
+                    "UPDATE purchase_order SET status = 'accepted', updated_at = NOW() WHERE id = %s",
+                    (po_id,)
+                )
+                cur.execute("""
+                    INSERT INTO purchase_order_audit
+                        (po_id, from_status, to_status, actor_role, actor_name, actor_code, notes)
+                    VALUES (%s, 'fulfilled', 'accepted', 'vendor', %s, %s, %s)
+                """, (po_id, request.actor_name, request.actor_code,
+                      f"Port {port_code} accepted — awaiting BPL"))
+
+            accepted_ports, rejected_ports = _get_port_lists(cur, po_id)
+            conn.commit()
+            logger.info(f"Port {port_code} accepted for PO {po_id} by {request.actor_code}")
+            return {"success": True, "po_id": po_id, "port_code": port_code,
+                    "accepted_ports": accepted_ports, "rejected_ports": rejected_ports}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error accepting port {port_code} for PO {po_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        release_connection(conn)
+
+
+@router.post("/purchase-orders/{po_id}/ports/{port_code}/reject")
+def reject_port(po_id: int, port_code: str, request: PortAcceptRequest):
+    """
+    Vendor rejects a specific port. Toggleable — can flip an accepted port to rejected.
+    If no accepted ports remain and PO is 'accepted', reverts PO back to 'sent'.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, status FROM purchase_order WHERE id = %s FOR UPDATE", (po_id,)
+            )
+            po = cur.fetchone()
+            if not po:
+                raise HTTPException(status_code=404, detail="Purchase order not found")
+            if po['status'] in ('rejected', 'cancelled', 'fulfilled'):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot change port status on a '{po['status']}' PO"
+                )
+
+            # Upsert port with status = 'rejected'
+            cur.execute("""
+                INSERT INTO purchase_order_port_acceptance
+                    (po_id, port_code, status, actor_name, actor_code, notes)
+                VALUES (%s, %s, 'rejected', %s, %s, %s)
+                ON CONFLICT (po_id, port_code)
+                DO UPDATE SET status = 'rejected', actor_name = EXCLUDED.actor_name,
+                              actor_code = EXCLUDED.actor_code
+            """, (po_id, port_code, request.actor_name, request.actor_code, request.notes))
+
+            # If PO is 'accepted', check remaining accepted ports
+            if po['status'] == 'accepted':
+                cur.execute(
+                    "SELECT COUNT(*) AS cnt FROM purchase_order_port_acceptance WHERE po_id = %s AND status = 'accepted'",
+                    (po_id,)
+                )
+                remaining = cur.fetchone()['cnt']
+                if remaining == 0:
+                    # No accepted ports left — revert to 'sent'
+                    cur.execute(
+                        "UPDATE purchase_order SET status = 'sent', updated_at = NOW() WHERE id = %s",
+                        (po_id,)
+                    )
+                    cur.execute("""
+                        INSERT INTO purchase_order_audit
+                            (po_id, from_status, to_status, actor_role, actor_name, actor_code, notes)
+                        VALUES (%s, 'accepted', 'sent', 'vendor', %s, %s, %s)
+                    """, (po_id, request.actor_name, request.actor_code,
+                          "All ports rejected — PO reverted to received"))
+                else:
+                    # Check if all remaining accepted ports already have sent/completed BPLs
+                    cur.execute("""
+                        SELECT COUNT(*) AS cnt
+                        FROM purchase_order_port_acceptance p
+                        JOIN box_packaging_list b ON p.po_id = b.po_id AND p.port_code = b.port_code
+                        WHERE p.po_id = %s AND p.status = 'accepted' AND b.status IN ('sent', 'completed')
+                    """, (po_id,))
+                    sent_count = cur.fetchone()['cnt']
+                    if sent_count >= remaining:
+                        # All remaining accepted ports have sent BPLs → re-fulfill
+                        cur.execute(
+                            "UPDATE purchase_order SET status = 'fulfilled', updated_at = NOW() WHERE id = %s",
+                            (po_id,)
+                        )
+                        cur.execute("""
+                            INSERT INTO purchase_order_audit
+                                (po_id, from_status, to_status, actor_role, actor_name, actor_code, notes)
+                            VALUES (%s, 'accepted', 'fulfilled', 'system', 'system', 'auto', %s)
+                        """, (po_id, f"Port {port_code} rejected — all remaining accepted ports already sent"))
+
+            accepted_ports, rejected_ports = _get_port_lists(cur, po_id)
+            conn.commit()
+            logger.info(f"Port {port_code} rejected for PO {po_id} by {request.actor_code}")
+            return {"success": True, "po_id": po_id, "port_code": port_code,
+                    "accepted_ports": accepted_ports, "rejected_ports": rejected_ports}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error rejecting port {port_code} for PO {po_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        release_connection(conn)
+
+
+@router.get("/purchase-orders/{po_id}/audit")
+def get_po_audit(po_id: int):
+    """Get the audit trail for a purchase order."""
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id FROM purchase_order WHERE id = %s", (po_id,)
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Purchase order not found")
+
+            cur.execute("""
+                SELECT id, po_id, from_status, to_status, actor_role,
+                       actor_name, actor_code, notes, created_at
+                FROM purchase_order_audit
+                WHERE po_id = %s
+                ORDER BY created_at ASC
+            """, (po_id,))
+            rows = cur.fetchall()
+            audit = []
+            for row in rows:
+                entry = dict(row)
+                entry['created_at'] = str(row['created_at'])
+                audit.append(entry)
+
+            return {"success": True, "audit": audit}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching audit for PO {po_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         release_connection(conn)
