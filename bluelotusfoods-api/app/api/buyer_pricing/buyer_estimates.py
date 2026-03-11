@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from app.db.db import get_connection, release_connection
 from app.services.pricing_calculations import calculate_estimate_totals
 from psycopg2.extras import RealDictCursor
@@ -44,6 +44,10 @@ class SaveBuyerEstimateRequest(BaseModel):
     delivery_date_from: Optional[date] = None
     delivery_date_to: Optional[date] = None
     region_groups: Optional[List[dict]] = None  # [{"region_name": "Asia", "port_codes": ["LAX", "SEA"]}]
+
+
+class SendEstimateRequest(BaseModel):
+    notify_buyer: bool = True
 
 
 class BuyerEstimateResponse(BaseModel):
@@ -502,7 +506,7 @@ async def get_company_estimates(company_id: int, limit: int = 5):
 
 
 @router.post("/{estimate_id}/send")
-async def send_estimate(estimate_id: int):
+async def send_estimate(estimate_id: int, request: Optional[SendEstimateRequest] = Body(default=None)):
     """Send estimate - update status to 'sent' and generate PDF"""
     conn = get_connection()
     try:
@@ -556,23 +560,9 @@ async def send_estimate(estimate_id: int):
             """, (estimate_id,))
             
             conn.commit()
-            
-            # Get buyer emails
-            cur.execute("""
-                SELECT email
-                FROM buyers
-                WHERE id IN (
-                    SELECT UNNEST(STRING_TO_ARRAY(%s, ',')::INTEGER[])
-                )
-                AND email IS NOT NULL
-                AND is_email_enabled = true
-            """, (estimate['buyer_ids'],))
-            
-            buyer_emails = [row['email'] for row in cur.fetchall()]
-            
-            if not buyer_emails:
-                raise HTTPException(status_code=400, detail="No valid buyer emails found for this estimate")
-            
+
+            notify_buyer = request.notify_buyer if request else True
+
             # Prepare items for email API
             email_items = []
             for item in items:
@@ -595,31 +585,48 @@ async def send_estimate(estimate_id: int):
                     'cut_id': item['cut_id'],
                     'grade_id': item['grade_id']
                 })
-            
-            # Send email via email service
+
             email_api_url = os.environ.get('EMAIL_SERVICE_URL', 'http://localhost:8001')
+            buyer_emails: list = []
+
             async with httpx.AsyncClient() as client:
-                email_response = await client.post(
-                    f"{email_api_url}/email/buyer-pricing/send-estimate",
-                    json={
-                        'buyer_emails': buyer_emails,
-                        'buyer_name': estimate['buyer_names'],
-                        'company_name': estimate['company_name'],
-                        'estimate_number': estimate['estimate_number'],
-                        'items': email_items,
-                        'delivery_date_from': estimate.get('delivery_date_from').isoformat() if estimate.get('delivery_date_from') else None,
-                        'delivery_date_to': estimate.get('delivery_date_to').isoformat() if estimate.get('delivery_date_to') else None,
-                        'notes': estimate.get('notes')
-                    },
-                    timeout=30.0
-                )
-                
-                email_data = email_response.json()
-                
-                if not email_data.get('success'):
-                    raise HTTPException(status_code=500, detail=f"Failed to send email: {email_data.get('message')}")
-                
-                # Send owner notification (fire and forget - don't block on failure)
+                if notify_buyer:
+                    # Get buyer emails
+                    cur.execute("""
+                        SELECT email
+                        FROM buyers
+                        WHERE id IN (
+                            SELECT UNNEST(STRING_TO_ARRAY(%s, ',')::INTEGER[])
+                        )
+                        AND email IS NOT NULL
+                        AND is_email_enabled = true
+                    """, (estimate['buyer_ids'],))
+                    buyer_emails = [row['email'] for row in cur.fetchall()]
+
+                    if not buyer_emails:
+                        raise HTTPException(status_code=400, detail="No valid buyer emails found for this estimate")
+
+                    email_response = await client.post(
+                        f"{email_api_url}/email/buyer-pricing/send-estimate",
+                        json={
+                            'buyer_emails': buyer_emails,
+                            'buyer_name': estimate['buyer_names'],
+                            'company_name': estimate['company_name'],
+                            'estimate_number': estimate['estimate_number'],
+                            'items': email_items,
+                            'delivery_date_from': estimate.get('delivery_date_from').isoformat() if estimate.get('delivery_date_from') else None,
+                            'delivery_date_to': estimate.get('delivery_date_to').isoformat() if estimate.get('delivery_date_to') else None,
+                            'notes': estimate.get('notes')
+                        },
+                        timeout=30.0
+                    )
+                    email_data = email_response.json()
+                    if not email_data.get('success'):
+                        raise HTTPException(status_code=500, detail=f"Failed to send email: {email_data.get('message')}")
+                else:
+                    logger.info(f"Buyer notification skipped for estimate {estimate['estimate_number']} (notify_buyer=False)")
+
+                # Send owner notification (always, fire and forget)
                 try:
                     owner_email = settings.owner_notification_email
                     await client.post(
@@ -637,13 +644,14 @@ async def send_estimate(estimate_id: int):
                     logger.info(f"Owner notification sent to {owner_email} for estimate {estimate['estimate_number']}")
                 except Exception as owner_err:
                     logger.error(f"Failed to send owner notification: {str(owner_err)}")
-            
+
             return {
                 "success": True,
-                "message": f"Estimate sent successfully to {len(buyer_emails)} recipient(s)",
+                "message": f"Estimate sent. Buyer notified: {notify_buyer}.",
                 "estimate_id": estimate_id,
                 "estimate_number": estimate['estimate_number'],
-                "buyer_emails": buyer_emails
+                "buyer_emails": buyer_emails,
+                "notify_buyer": notify_buyer
             }
             
     except Exception as e:
@@ -858,6 +866,62 @@ async def create_purchase_order(request: CreatePORequest):
         conn.rollback()
         logger.error(f"Error creating purchase order: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating purchase order: {str(e)}")
+    finally:
+        release_connection(conn)
+
+
+class POCancelRequest(BaseModel):
+    actor_name: str
+    actor_code: str
+    notes: Optional[str] = None
+
+
+@router.post("/purchase-orders/{po_id}/cancel")
+def cancel_purchase_order(po_id: int, request: POCancelRequest):
+    """
+    Buyer cancels a purchase order. Only allowed from 'sent' status
+    (before vendor has accepted).
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Row-lock and validate transition
+            cur.execute(
+                "SELECT id, status FROM purchase_order WHERE id = %s FOR UPDATE",
+                (po_id,)
+            )
+            po = cur.fetchone()
+            if not po:
+                raise HTTPException(status_code=404, detail="Purchase order not found")
+
+            if po['status'] not in ['sent']:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot cancel PO from status '{po['status']}'. "
+                           f"Cancellation is only allowed before vendor accepts."
+                )
+
+            cur.execute(
+                "UPDATE purchase_order SET status = 'cancelled', updated_at = NOW() WHERE id = %s",
+                (po_id,)
+            )
+            cur.execute(
+                """
+                INSERT INTO purchase_order_audit
+                    (po_id, from_status, to_status, actor_role, actor_name, actor_code, notes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (po_id, po['status'], 'cancelled', 'buyer', request.actor_name, request.actor_code, request.notes)
+            )
+            conn.commit()
+            logger.info(f"PO {po_id} cancelled by buyer {request.actor_code}")
+            return {"success": True, "po_id": po_id, "status": "cancelled"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error cancelling PO {po_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         release_connection(conn)
 
