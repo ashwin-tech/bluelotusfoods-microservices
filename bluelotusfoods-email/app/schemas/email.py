@@ -129,3 +129,20 @@ class SendBPLEmailRequest(BaseModel):
     total_boxes: int = 0
     notes: Optional[str] = None
     items: List[BPLItem]
+
+
+class SendBPLUploadedEmailRequest(BaseModel):
+    """For vendors who upload a document instead of entering box data manually."""
+    owner_email: str
+    vendor_email: str
+    vendor_name: str
+    vendor_country: Optional[str] = None
+    po_number: str
+    port_code: str
+    invoice_number: Optional[str] = None
+    air_way_bill: Optional[str] = None
+    packed_date: Optional[str] = None
+    expiry_date: Optional[str] = None
+    notes: Optional[str] = None
+    attachment_bytes: str       # base64-encoded file content
+    attachment_filename: str

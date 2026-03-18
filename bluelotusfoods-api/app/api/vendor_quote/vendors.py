@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from app.db.db import get_connection, release_connection
 from app.db.queries import DatabaseQueries
 from psycopg2.extras import RealDictCursor
@@ -7,6 +7,7 @@ from typing import Optional, List
 from app.core.settings import settings
 import httpx
 import logging
+import base64
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -440,7 +441,8 @@ async def send_bpl_email(po_id: int, port_code: str):
 
             # 2) Get BPL header for this PO + port
             cur.execute("""
-                SELECT id, invoice_number, air_way_bill, packed_date, expiry_date
+                SELECT id, invoice_number, air_way_bill, packed_date, expiry_date,
+                       uploaded_file_path, uploaded_file_name
                 FROM box_packaging_list
                 WHERE po_id = %s AND port_code = %s
             """, (po_id, port_code))
@@ -449,85 +451,117 @@ async def send_bpl_email(po_id: int, port_code: str):
                 raise HTTPException(status_code=404, detail="No BPL found for this PO and port")
 
             bpl_id = bpl_row['id']
+            is_upload_mode = bool(bpl_row.get('uploaded_file_path'))
 
-            # 3) Get BPL items (boxes) joined to PO item details
-            cur.execute("""
-                SELECT
-                    bi.id AS bpl_item_id, bi.po_item_id, bi.box_number, bi.num_pieces,
-                    bi.net_weight_kg,
-                    poi.fish_name, poi.cut_name, poi.grade_name, poi.fish_size,
-                    poi.order_weight_kg
-                FROM box_packaging_list_item bi
-                JOIN purchase_order_item poi ON bi.po_item_id = poi.id
-                WHERE bi.bpl_id = %s
-                ORDER BY poi.fish_name, poi.cut_name, bi.box_number
-            """, (bpl_id,))
-            box_rows = [dict(r) for r in cur.fetchall()]
+            if is_upload_mode:
+                # Upload mode: fetch file from GCS and forward as attachment
+                email_payload = {
+                    "po_number": po_row['po_number'],
+                    "port_code": port_code,
+                    "vendor_name": po_row['vendor_name'],
+                    "vendor_email": po_row['vendor_email'] or "",
+                    "vendor_country": po_row['vendor_country'] or "",
+                    "owner_email": settings.owner_notification_email,
+                    "invoice_number": bpl_row['invoice_number'] or "",
+                    "air_way_bill": bpl_row['air_way_bill'] or "",
+                    "packed_date": str(bpl_row['packed_date']) if bpl_row.get('packed_date') else "",
+                    "expiry_date": str(bpl_row['expiry_date']) if bpl_row.get('expiry_date') else "",
+                    "attachment_filename": bpl_row['uploaded_file_name'],
+                }
+                try:
+                    from google.cloud import storage as gcs_storage
+                    gcs_client = gcs_storage.Client()
+                    bucket = gcs_client.bucket(settings.gcs_bucket_name)
+                    blob = bucket.blob(bpl_row['uploaded_file_path'])
+                    file_bytes = blob.download_as_bytes()
+                    email_payload["attachment_bytes"] = base64.b64encode(file_bytes).decode('utf-8')
+                    logger.info(f"Fetched BPL file from GCS for email: {bpl_row['uploaded_file_path']} ({len(file_bytes)} bytes)")
+                except Exception as gcs_err:
+                    logger.error(f"GCS download failed: {gcs_err}")
+                    raise HTTPException(status_code=500, detail=f"Failed to fetch uploaded file: {str(gcs_err)}")
 
-            # 4) Fetch pieces for each box
-            for box in box_rows:
+                email_endpoint = f"{settings.email_service_url}/email/bpl/send-uploaded"
+                logger.info(f"📧 Sending uploaded BPL email for PO {po_row['po_number']} port {port_code}")
+            else:
+                # Manual mode: build structured data payload for PDF generation
+                # 3) Get BPL items (boxes) joined to PO item details
                 cur.execute("""
-                    SELECT piece_number, weight_kg
-                    FROM box_packaging_list_piece
-                    WHERE bpl_item_id = %s
-                    ORDER BY piece_number
-                """, (box['bpl_item_id'],))
-                box['pieces'] = [dict(p) for p in cur.fetchall()]
+                    SELECT
+                        bi.id AS bpl_item_id, bi.po_item_id, bi.box_number, bi.num_pieces,
+                        bi.net_weight_kg,
+                        poi.fish_name, poi.cut_name, poi.grade_name, poi.fish_size,
+                        poi.order_weight_kg
+                    FROM box_packaging_list_item bi
+                    JOIN purchase_order_item poi ON bi.po_item_id = poi.id
+                    WHERE bi.bpl_id = %s
+                    ORDER BY poi.fish_name, poi.cut_name, bi.box_number
+                """, (bpl_id,))
+                box_rows = [dict(r) for r in cur.fetchall()]
 
-            # 5) Group boxes by PO item (species line)
-            items_map = {}
-            for box in box_rows:
-                key = box['po_item_id']
-                if key not in items_map:
-                    items_map[key] = {
-                        "fish_name": box['fish_name'],
-                        "cut_name": box['cut_name'],
-                        "grade_name": box['grade_name'],
-                        "fish_size": box['fish_size'],
-                        "order_weight_kg": float(box['order_weight_kg']) if box.get('order_weight_kg') else 0,
-                        "boxes": [],
-                    }
-                total_weight = sum(
-                    float(p['weight_kg']) for p in box['pieces']
-                ) if box['pieces'] else (float(box['net_weight_kg']) if box.get('net_weight_kg') else 0)
+                # 4) Fetch pieces for each box
+                for box in box_rows:
+                    cur.execute("""
+                        SELECT piece_number, weight_kg
+                        FROM box_packaging_list_piece
+                        WHERE bpl_item_id = %s
+                        ORDER BY piece_number
+                    """, (box['bpl_item_id'],))
+                    box['pieces'] = [dict(p) for p in cur.fetchall()]
 
-                items_map[key]["boxes"].append({
-                    "box_number": box['box_number'],
-                    "num_pieces": box['num_pieces'],
-                    "net_weight_kg": total_weight,
-                    "pieces": [
-                        {"piece_number": p['piece_number'], "weight_kg": float(p['weight_kg'])}
-                        for p in box['pieces']
-                    ],
-                })
+                # 5) Group boxes by PO item (species line)
+                items_map = {}
+                for box in box_rows:
+                    key = box['po_item_id']
+                    if key not in items_map:
+                        items_map[key] = {
+                            "fish_name": box['fish_name'],
+                            "cut_name": box['cut_name'],
+                            "grade_name": box['grade_name'],
+                            "fish_size": box['fish_size'],
+                            "order_weight_kg": float(box['order_weight_kg']) if box.get('order_weight_kg') else 0,
+                            "boxes": [],
+                        }
+                    total_weight = sum(
+                        float(p['weight_kg']) for p in box['pieces']
+                    ) if box['pieces'] else (float(box['net_weight_kg']) if box.get('net_weight_kg') else 0)
 
-            items_list = list(items_map.values())
-            total_boxes = sum(len(item['boxes']) for item in items_list)
+                    items_map[key]["boxes"].append({
+                        "box_number": box['box_number'],
+                        "num_pieces": box['num_pieces'],
+                        "net_weight_kg": total_weight,
+                        "pieces": [
+                            {"piece_number": p['piece_number'], "weight_kg": float(p['weight_kg'])}
+                            for p in box['pieces']
+                        ],
+                    })
 
-            # 6) Build email payload
-            email_payload = {
-                "po_number": po_row['po_number'],
-                "port_code": port_code,
-                "vendor_name": po_row['vendor_name'],
-                "vendor_email": po_row['vendor_email'] or "",
-                "vendor_country": po_row['vendor_country'] or "",
-                "owner_email": settings.owner_notification_email,
-                "invoice_number": bpl_row['invoice_number'] or "",
-                "air_way_bill": bpl_row['air_way_bill'] or "",
-                "packed_date": str(bpl_row['packed_date']) if bpl_row.get('packed_date') else "",
-                "expiry_date": str(bpl_row['expiry_date']) if bpl_row.get('expiry_date') else "",
-                "total_boxes": total_boxes,
-                "items": items_list,
-            }
+                items_list = list(items_map.values())
+                total_boxes = sum(len(item['boxes']) for item in items_list)
 
-            logger.info(f"📧 Sending BPL email for PO {po_row['po_number']} port {port_code}")
+                email_payload = {
+                    "po_number": po_row['po_number'],
+                    "port_code": port_code,
+                    "vendor_name": po_row['vendor_name'],
+                    "vendor_email": po_row['vendor_email'] or "",
+                    "vendor_country": po_row['vendor_country'] or "",
+                    "owner_email": settings.owner_notification_email,
+                    "invoice_number": bpl_row['invoice_number'] or "",
+                    "air_way_bill": bpl_row['air_way_bill'] or "",
+                    "packed_date": str(bpl_row['packed_date']) if bpl_row.get('packed_date') else "",
+                    "expiry_date": str(bpl_row['expiry_date']) if bpl_row.get('expiry_date') else "",
+                    "total_boxes": total_boxes,
+                    "items": items_list,
+                }
+                email_endpoint = f"{settings.email_service_url}/email/bpl/send-emails"
+                logger.info(f"📧 Sending BPL email for PO {po_row['po_number']} port {port_code}")
+
             logger.info(f"   Vendor: {po_row['vendor_name']} ({po_row['vendor_email']})")
-            logger.info(f"   Items: {len(items_list)}, Email service: {settings.email_service_url}")
+            logger.info(f"   Email service: {settings.email_service_url}, upload_mode={is_upload_mode}")
 
         # 7) Call email service (outside the DB cursor context)
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{settings.email_service_url}/email/bpl/send-emails",
+                email_endpoint,
                 json=email_payload,
                 timeout=60.0,
             )
@@ -566,7 +600,7 @@ async def send_bpl_email(po_id: int, port_code: str):
                             FROM box_packaging_list b
                             JOIN purchase_order_port_acceptance p
                               ON b.po_id = p.po_id AND b.port_code = p.port_code
-                            WHERE b.po_id = %s AND b.status IN ('sent', 'completed') AND p.status = 'accepted'
+                            WHERE b.po_id = %s AND b.status = 'sent' AND p.status = 'accepted'
                         """, (po_id,))
                         sent_count = cur2.fetchone()['cnt']
 
@@ -809,7 +843,7 @@ def reject_port(po_id: int, port_code: str, request: PortAcceptRequest):
                         SELECT COUNT(*) AS cnt
                         FROM purchase_order_port_acceptance p
                         JOIN box_packaging_list b ON p.po_id = b.po_id AND p.port_code = b.port_code
-                        WHERE p.po_id = %s AND p.status = 'accepted' AND b.status IN ('sent', 'completed')
+                        WHERE p.po_id = %s AND p.status = 'accepted' AND b.status = 'sent'
                     """, (po_id,))
                     sent_count = cur.fetchone()['cnt']
                     if sent_count >= remaining:
@@ -835,6 +869,188 @@ def reject_port(po_id: int, port_code: str, request: PortAcceptRequest):
     except Exception as e:
         conn.rollback()
         logger.error(f"Error rejecting port {port_code} for PO {po_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        release_connection(conn)
+
+
+class ManualFulfillRequest(BaseModel):
+    actor_name: str
+    actor_code: str
+
+
+@router.post("/purchase-orders/{po_id}/fulfill")
+def manually_fulfill_po(po_id: int, request: ManualFulfillRequest):
+    """
+    Vendor manually marks a PO as fulfilled without requiring a BPL.
+    For vendors who manage shipping details outside the portal.
+    Overrides the normal BPL-based auto-fulfill flow.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            _transition_po_status(
+                cur, po_id,
+                allowed_from=['accepted'],
+                new_status='fulfilled',
+                actor_role='vendor',
+                actor_name=request.actor_name,
+                actor_code=request.actor_code,
+                notes='Manually marked fulfilled by vendor (no BPL)',
+            )
+            conn.commit()
+            logger.info(f"PO {po_id} manually fulfilled by vendor {request.actor_code}")
+            return {"success": True, "po_id": po_id, "po_status": "fulfilled"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error manually fulfilling PO {po_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        release_connection(conn)
+
+
+@router.get("/purchase-orders/{po_id}/timeline")
+def get_po_timeline(po_id: int):
+    """
+    Return key timestamps for the PO lifecycle:
+    created_at, first accepted_at, and fulfilled_at.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, created_at FROM purchase_order WHERE id = %s",
+                (po_id,)
+            )
+            po = cur.fetchone()
+            if not po:
+                raise HTTPException(status_code=404, detail="Purchase order not found")
+
+            cur.execute("""
+                SELECT
+                    MIN(CASE WHEN to_status = 'accepted' THEN created_at END) AS accepted_at,
+                    MAX(CASE WHEN to_status = 'fulfilled' THEN created_at END) AS fulfilled_at
+                FROM purchase_order_audit
+                WHERE po_id = %s
+            """, (po_id,))
+            row = cur.fetchone()
+
+            return {
+                "success": True,
+                "created_at": str(po['created_at']),
+                "accepted_at": str(row['accepted_at']) if row['accepted_at'] else None,
+                "fulfilled_at": str(row['fulfilled_at']) if row['fulfilled_at'] else None,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching timeline for PO {po_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        release_connection(conn)
+
+
+@router.post("/purchase-orders/bpl/upload")
+async def upload_bpl_file(
+    po_id: int = Form(...),
+    port_code: str = Form(...),
+    invoice_number: Optional[str] = Form(None),
+    air_way_bill: Optional[str] = Form(None),
+    packed_date: Optional[str] = Form(None),
+    expiry_date: Optional[str] = Form(None),
+    notes: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+):
+    """
+    Upload a BPL document (PDF/Excel/image) for a PO + port.
+    The file is stored in GCS and the path saved in the DB.
+    The BPL is immediately marked as 'completed'.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Guard: port must be accepted
+            cur.execute(
+                "SELECT id FROM purchase_order_port_acceptance WHERE po_id = %s AND port_code = %s AND status = 'accepted'",
+                (po_id, port_code)
+            )
+            if not cur.fetchone():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Port '{port_code}' has not been accepted for this PO"
+                )
+            # Guard: PO must not be rejected/cancelled
+            cur.execute("SELECT status FROM purchase_order WHERE id = %s", (po_id,))
+            po_row = cur.fetchone()
+            if not po_row:
+                raise HTTPException(status_code=404, detail="Purchase order not found")
+            if po_row['status'] in ('rejected', 'cancelled'):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"BPL upload not allowed for PO with status '{po_row['status']}'"
+                )
+
+            # Read file bytes and upload to GCS
+            file_bytes = await file.read()
+            original_name = file.filename or "bpl_upload"
+            gcs_path = f"bpl/{po_id}/{port_code}/{original_name}"
+
+            try:
+                from google.cloud import storage as gcs_storage
+                gcs_client = gcs_storage.Client()
+                bucket = gcs_client.bucket(settings.gcs_bucket_name)
+                blob = bucket.blob(gcs_path)
+                blob.upload_from_string(file_bytes, content_type=file.content_type or 'application/octet-stream')
+                logger.info(f"Uploaded BPL file to GCS: gs://{settings.gcs_bucket_name}/{gcs_path}")
+            except Exception as gcs_err:
+                logger.error(f"GCS upload failed: {gcs_err}")
+                raise HTTPException(status_code=500, detail=f"File storage failed: {str(gcs_err)}")
+
+            # Upsert BPL row
+            cur.execute("""
+                SELECT id FROM box_packaging_list WHERE po_id = %s AND port_code = %s
+            """, (po_id, port_code))
+            existing = cur.fetchone()
+
+            if existing:
+                bpl_id = existing['id']
+                cur.execute("""
+                    UPDATE box_packaging_list
+                    SET status = 'completed',
+                        uploaded_file_path = %s,
+                        uploaded_file_name = %s,
+                        invoice_number = %s, air_way_bill = %s,
+                        packed_date = %s, expiry_date = %s,
+                        notes = %s, updated_at = NOW()
+                    WHERE id = %s
+                """, (gcs_path, original_name,
+                      invoice_number, air_way_bill,
+                      packed_date, expiry_date, notes,
+                      bpl_id))
+                # Clear any existing box entries (switching from manual to upload)
+                cur.execute("DELETE FROM box_packaging_list_item WHERE bpl_id = %s", (bpl_id,))
+            else:
+                cur.execute("""
+                    INSERT INTO box_packaging_list
+                        (po_id, port_code, status, uploaded_file_path, uploaded_file_name,
+                         invoice_number, air_way_bill, packed_date, expiry_date, notes)
+                    VALUES (%s, %s, 'completed', %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (po_id, port_code, gcs_path, original_name,
+                      invoice_number, air_way_bill, packed_date, expiry_date, notes))
+                bpl_id = cur.fetchone()['id']
+
+            conn.commit()
+            logger.info(f"Saved upload BPL {bpl_id} for PO {po_id} port {port_code}: {original_name}")
+            return {"success": True, "bpl_id": bpl_id, "file_name": original_name, "status": "completed"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error uploading BPL: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         release_connection(conn)

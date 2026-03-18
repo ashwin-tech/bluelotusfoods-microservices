@@ -8,7 +8,8 @@ from email import encoders
 from typing import Optional
 import aiosmtplib
 from app.core.settings import settings
-from app.schemas.email import VendorQuoteData, EmailResponse, SendBPLEmailRequest
+from app.schemas.email import VendorQuoteData, EmailResponse, SendBPLEmailRequest, SendBPLUploadedEmailRequest
+import base64
 from app.services.pdf_generator import generate_vendor_quote_pdf, generate_estimate_pdf, generate_bpl_owner_pdf, generate_bpl_vendor_pdf
 import structlog
 
@@ -1017,3 +1018,107 @@ class EmailService:
         except Exception as e:
             logger.error(f"Failed to send BPL emails: {str(e)}", error=str(e))
             return EmailResponse(success=False, message=f"Failed to send BPL emails: {str(e)}")
+
+    async def send_bpl_uploaded_emails(self, request: SendBPLUploadedEmailRequest) -> EmailResponse:
+        """
+        Send BPL emails with vendor's uploaded document as attachment.
+        Sent to both owner and vendor. No PDF generation — raw file attached.
+        """
+        try:
+            file_bytes = base64.b64decode(request.attachment_bytes)
+            logger.info(f"Decoded uploaded BPL file: {request.attachment_filename} ({len(file_bytes)} bytes)")
+
+            if settings.email_simulation_mode:
+                logger.warning("Email simulation mode - uploaded BPL email skipped")
+                return EmailResponse(
+                    success=True,
+                    message="Uploaded BPL email simulation successful - SMTP skipped",
+                    email_id=f"bpl_upload_{request.po_number}_{request.port_code}_simulation"
+                )
+
+            if not settings.smtp_username or not settings.smtp_password or not settings.from_email:
+                logger.warning("SMTP not configured, skipping uploaded BPL email send")
+                return EmailResponse(success=False, message="Email service not configured (missing SMTP credentials)")
+
+            from datetime import datetime
+            import pytz
+            central_tz = pytz.timezone('US/Central')
+            now_ct = datetime.now(central_tz).strftime('%m/%d/%Y %I:%M %p')
+
+            safe_po = request.po_number.replace(' ', '_')
+
+            # Determine MIME type from filename extension
+            fname_lower = request.attachment_filename.lower()
+            if fname_lower.endswith('.pdf'):
+                mime_type = 'application/pdf'
+            elif fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls'):
+                mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            else:
+                mime_type = 'application/octet-stream'
+
+            def _build_att(filename: str) -> MIMEBase:
+                att = MIMEBase('application', 'octet-stream')
+                att.set_payload(file_bytes)
+                encoders.encode_base64(att)
+                att.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+                att.add_header('Content-Type', mime_type)
+                return att
+
+            # ─── Email 1: Owner ───
+            owner_msg = MIMEMultipart()
+            owner_msg["From"] = f"{settings.from_name} <{settings.from_email}>"
+            owner_msg["To"] = request.owner_email
+            owner_msg["Subject"] = f"BPL (Uploaded) - {request.vendor_name} - {request.po_number} - Port {request.port_code} - {now_ct}"
+
+            owner_body = f"""
+            <html><body style="font-family:Arial,sans-serif;color:#1e293b;">
+            <h2 style="color:#0A3D5C;">Box Packaging List Received (Uploaded Document)</h2>
+            <p>Vendor <b>{request.vendor_name}</b> has submitted a Box Packaging List document for:</p>
+            <ul>
+                <li><b>PO:</b> {request.po_number}</li>
+                <li><b>Port:</b> {request.port_code}</li>
+                <li><b>Invoice:</b> {request.invoice_number or 'N/A'}</li>
+                <li><b>AWB:</b> {request.air_way_bill or 'N/A'}</li>
+            </ul>
+            <p>The vendor's uploaded document is attached.</p>
+            <hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;">
+            <p style="font-size:12px;color:#6b7280;">&copy; Blue Lotus Foods LLC</p>
+            </body></html>
+            """
+            owner_msg.attach(MIMEText(owner_body, "html"))
+            owner_msg.attach(_build_att(f"BPL_{safe_po}_{request.port_code}_{request.attachment_filename}"))
+
+            await self._send_email(owner_msg)
+            logger.info(f"Uploaded BPL owner email sent to {request.owner_email}")
+
+            # ─── Email 2: Vendor ───
+            vendor_msg = MIMEMultipart()
+            vendor_msg["From"] = f"{settings.from_name} <{settings.from_email}>"
+            vendor_msg["To"] = request.vendor_email
+            vendor_msg["Subject"] = f"BPL Confirmation - {request.po_number} - Port {request.port_code}"
+
+            vendor_body = f"""
+            <html><body style="font-family:Arial,sans-serif;color:#1e293b;">
+            <h2>Box Packaging List Confirmation</h2>
+            <p>Dear {request.vendor_name},</p>
+            <p>Your Box Packaging List document for <b>{request.po_number}</b> (Port: {request.port_code}) has been submitted successfully.</p>
+            <p>Your uploaded document is attached for your records.</p>
+            <br>
+            <p>Thank you,<br>Blue Lotus Foods</p>
+            </body></html>
+            """
+            vendor_msg.attach(MIMEText(vendor_body, "html"))
+            vendor_msg.attach(_build_att(request.attachment_filename))
+
+            await self._send_email(vendor_msg)
+            logger.info(f"Uploaded BPL vendor email sent to {request.vendor_email}")
+
+            return EmailResponse(
+                success=True,
+                message="Uploaded BPL emails sent to owner and vendor",
+                email_id=f"bpl_upload_{request.po_number}_{request.port_code}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to send uploaded BPL emails: {str(e)}", error=str(e))
+            return EmailResponse(success=False, message=f"Failed to send uploaded BPL emails: {str(e)}")
