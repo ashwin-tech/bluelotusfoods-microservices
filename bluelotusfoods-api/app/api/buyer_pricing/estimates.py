@@ -150,12 +150,14 @@ async def search_estimates(request: CreateEstimateRequest):
                     qp.quantity as offer_quantity,
                     qp.price_per_kg as fish_price,
                     qd.airfreight_per_kg as freight_price,
-                    COALESCE(t.reciprocal_tariff + t.secondary_tariff, 0) as tariff_percent,
+                    COALESCE(t.reciprocal_tariff + t.secondary_tariff, 0)
+                    + COALESCE(tg.reciprocal_tariff + tg.secondary_tariff, 0) as tariff_percent,
                     0 as margin,
                     0 as clearing_charges
                 FROM quote q
                 JOIN vendors v ON q.vendor_id = v.id
-                LEFT JOIN tariff t ON v.country = t.country AND t.active = true
+                LEFT JOIN tariff t ON v.country = t.country AND t.active = true AND t.country != 'Global'
+                LEFT JOIN tariff tg ON tg.country = 'Global' AND tg.active = true
                 JOIN quote_destination qd ON q.id = qd.quote_id
                 JOIN dictionary d ON qd.destination_id = d.id
                 JOIN quote_product qp ON q.id = qp.quote_id
@@ -255,9 +257,13 @@ async def get_buyer_estimates(buyer_id: int, date_range: Optional[str] = "This W
                     qp.weight_range as fish_size,
                     qp.price_per_kg as fish_price,
                     qd.airfreight_per_kg as freight_price,
-                    0 as tariff_percent,
+                    COALESCE(t.reciprocal_tariff + t.secondary_tariff, 0)
+                    + COALESCE(tg.reciprocal_tariff + tg.secondary_tariff, 0) as tariff_percent,
                     0 as margin
                 FROM quote q
+                JOIN vendors v ON q.vendor_id = v.id
+                LEFT JOIN tariff t ON v.country = t.country AND t.active = true AND t.country != 'Global'
+                LEFT JOIN tariff tg ON tg.country = 'Global' AND tg.active = true
                 JOIN quote_destination qd ON q.id = qd.quote_id
                 JOIN dictionary d ON qd.destination_id = d.id
                 JOIN quote_product qp ON q.id = qp.quote_id

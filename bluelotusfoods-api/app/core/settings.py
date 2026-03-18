@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # External Services
     email_service_url: str
     owner_notification_email: str
+
+    # GCS (file uploads)
+    gcs_bucket_name: Optional[str] = None
     
     @field_validator('cors_allow_methods', 'cors_allow_headers', mode='before')
     @classmethod

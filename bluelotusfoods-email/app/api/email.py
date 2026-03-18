@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, status
-from app.schemas.email import VendorQuoteEmailRequest, OwnerNotificationEmailRequest, EmailResponse, VendorQuoteData, BuyerPricingEmailRequest, OwnerEstimateNotificationRequest, SendBPLEmailRequest
+from app.schemas.email import VendorQuoteEmailRequest, OwnerNotificationEmailRequest, EmailResponse, VendorQuoteData, BuyerPricingEmailRequest, OwnerEstimateNotificationRequest, SendBPLEmailRequest, SendBPLUploadedEmailRequest
 from app.services.email_service import EmailService
 import structlog
 
@@ -185,4 +185,33 @@ async def send_bpl_emails(request: SendBPLEmailRequest):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to send BPL emails: {str(e)} | Traceback: {error_details[:500]}"
+        )
+
+
+@router.post("/bpl/send-uploaded", response_model=EmailResponse)
+async def send_bpl_uploaded_email(request: SendBPLUploadedEmailRequest):
+    """Send BPL emails with the vendor's uploaded document as the attachment."""
+    try:
+        logger.info(f"Received uploaded BPL email request for PO {request.po_number}, port {request.port_code}")
+        logger.info(f"Vendor: {request.vendor_name}, file: {request.attachment_filename}")
+
+        result = await email_service.send_bpl_uploaded_emails(request)
+
+        logger.info(f"Uploaded BPL email result: success={result.success}, message={result.message}")
+
+        if not result.success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result.message
+            )
+
+        return result
+
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        logger.error("Uploaded BPL email API error", error=str(e), traceback=error_details)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to send uploaded BPL email: {str(e)} | Traceback: {error_details[:500]}"
         )

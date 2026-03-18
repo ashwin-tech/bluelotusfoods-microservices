@@ -953,6 +953,17 @@ async def get_pos_by_estimate(estimate_id: int):
                 # Convert datetime to string
                 pos_by_vendor[vid]['created_at'] = str(row['created_at'])
 
+            # Fetch items for each PO so the buyer can see what weights were ordered
+            for po_dict in pos_by_vendor.values():
+                cur.execute("""
+                    SELECT fish_name, cut_name, grade_name, fish_size,
+                           port_code, order_weight_lbs, order_weight_kg
+                    FROM purchase_order_item
+                    WHERE po_id = %s
+                    ORDER BY port_code, fish_name
+                """, (po_dict['id'],))
+                po_dict['items'] = [dict(r) for r in cur.fetchall()]
+
             return {"success": True, "purchase_orders": pos_by_vendor}
 
     except Exception as e:
