@@ -963,6 +963,7 @@ async def get_pos_by_estimate(estimate_id: int):
                     ORDER BY port_code, fish_name
                 """, (po_dict['id'],))
                 po_dict['items'] = [dict(r) for r in cur.fetchall()]
+                logger.info(f"[get_pos_by_estimate] estimate={estimate_id} po={po_dict['po_number']} items={len(po_dict['items'])}")
 
             return {"success": True, "purchase_orders": pos_by_vendor}
 
