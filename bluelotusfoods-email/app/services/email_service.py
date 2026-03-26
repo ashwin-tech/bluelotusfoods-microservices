@@ -915,6 +915,8 @@ class EmailService:
                                 'box_number': box.box_number,
                                 'num_pieces': box.num_pieces,
                                 'net_weight_kg': box.net_weight_kg,
+                                'weight_range_from_kg': box.weight_range_from_kg,
+                                'weight_range_to_kg': box.weight_range_to_kg,
                                 'pieces': [{'piece_number': p.piece_number, 'weight_kg': p.weight_kg} for p in box.pieces],
                             }
                             for box in item.boxes

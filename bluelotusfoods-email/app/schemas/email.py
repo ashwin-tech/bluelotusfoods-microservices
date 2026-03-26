@@ -105,6 +105,8 @@ class BPLBox(BaseModel):
     num_pieces: int
     net_weight_kg: float
     pieces: List[BPLPiece] = []
+    weight_range_from_kg: Optional[float] = None
+    weight_range_to_kg: Optional[float] = None
 
 class BPLItem(BaseModel):
     """One PO line item with its boxes"""

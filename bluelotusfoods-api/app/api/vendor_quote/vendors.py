@@ -83,8 +83,10 @@ class BPLBoxItem(BaseModel):
     box_number: int
     num_pieces: int = 1
     pieces: List[BPLPieceItem] = []
-    # net_weight_kg is auto-computed from sum of piece weights
-    # gross_weight_kg is optional (for legacy compat)
+    # Range mode (cut fillet): pieces is empty, net weight entered directly
+    weight_range_from_kg: Optional[float] = None
+    weight_range_to_kg: Optional[float] = None
+    net_weight_kg: Optional[float] = None  # direct entry for range mode
 
 
 class SaveBPLRequest(BaseModel):
@@ -181,6 +183,7 @@ def get_bpl_for_po(po_id: int):
                     SELECT
                         bi.id, bi.po_item_id, bi.box_number, bi.num_pieces,
                         bi.net_weight_kg, bi.gross_weight_kg,
+                        bi.weight_range_from_kg, bi.weight_range_to_kg,
                         poi.fish_name, poi.cut_name, poi.grade_name, poi.fish_size
                     FROM box_packaging_list_item bi
                     JOIN purchase_order_item poi ON bi.po_item_id = poi.id
@@ -304,19 +307,24 @@ def save_bpl(request: SaveBPLRequest):
 
             # Insert box items + their pieces
             for box in request.boxes:
-                # net_weight = sum of piece weights
-                net_wt = sum(p.weight_kg for p in box.pieces) if box.pieces else 0
+                # Range mode: pieces is empty, net weight entered directly
+                if box.pieces:
+                    net_wt = sum(p.weight_kg for p in box.pieces)
+                else:
+                    net_wt = box.net_weight_kg or 0
                 cur.execute("""
                     INSERT INTO box_packaging_list_item
                         (bpl_id, po_item_id, box_number, box_count, num_pieces,
-                         net_weight_kg, gross_weight_kg)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                         net_weight_kg, gross_weight_kg,
+                         weight_range_from_kg, weight_range_to_kg)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (bpl_id, box.po_item_id, box.box_number, box.num_pieces,
-                      box.num_pieces, net_wt, net_wt))
+                      box.num_pieces, net_wt, net_wt,
+                      box.weight_range_from_kg, box.weight_range_to_kg))
                 bpl_item_id = cur.fetchone()['id']
 
-                # Insert individual pieces
+                # Insert individual pieces (skipped for range mode)
                 for piece in box.pieces:
                     cur.execute("""
                         INSERT INTO box_packaging_list_piece
@@ -488,7 +496,7 @@ async def send_bpl_email(po_id: int, port_code: str):
                 cur.execute("""
                     SELECT
                         bi.id AS bpl_item_id, bi.po_item_id, bi.box_number, bi.num_pieces,
-                        bi.net_weight_kg,
+                        bi.net_weight_kg, bi.weight_range_from_kg, bi.weight_range_to_kg,
                         poi.fish_name, poi.cut_name, poi.grade_name, poi.fish_size,
                         poi.order_weight_kg
                     FROM box_packaging_list_item bi
@@ -529,6 +537,8 @@ async def send_bpl_email(po_id: int, port_code: str):
                         "box_number": box['box_number'],
                         "num_pieces": box['num_pieces'],
                         "net_weight_kg": total_weight,
+                        "weight_range_from_kg": float(box['weight_range_from_kg']) if box.get('weight_range_from_kg') is not None else None,
+                        "weight_range_to_kg": float(box['weight_range_to_kg']) if box.get('weight_range_to_kg') is not None else None,
                         "pieces": [
                             {"piece_number": p['piece_number'], "weight_kg": float(p['weight_kg'])}
                             for p in box['pieces']

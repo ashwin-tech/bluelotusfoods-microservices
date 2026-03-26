@@ -748,6 +748,20 @@ def generate_bpl_vendor_pdf(bpl_data: Dict[str, Any]) -> bytes:
     return pdf_bytes
 
 
+def _fmt_weight_range(from_kg: float, to_kg: float) -> str:
+    """Convert a kg range to a display string.
+    If the lb value is < 1 → display in oz (rounded to nearest whole oz).
+    If >= 1 lb → round to nearest 0.5 lb.
+    """
+    def kg_to_display(kg: float) -> str:
+        lbs = kg * 2.20462
+        if lbs < 1.0:
+            return f"{round(lbs * 16)}oz"
+        rounded = round(lbs * 2) / 2
+        return f"{rounded:.1f}lbs"
+    return f"{kg_to_display(from_kg)} \u2013 {kg_to_display(to_kg)}"
+
+
 def _build_bpl_box_tables(elements, bpl_data: Dict[str, Any], styles, accent_color, owner_mode=False):
     """Shared helper: build box detail tables grouped by PO item.
     owner_mode=True  → no size in banner, stacked weights, LBS columns, summary table
@@ -802,11 +816,16 @@ def _build_bpl_box_tables(elements, bpl_data: Dict[str, Any], styles, accent_col
 
             for box in boxes:
                 pieces = box.get('pieces', [])
+                from_kg = box.get('weight_range_from_kg')
+                to_kg = box.get('weight_range_to_kg')
                 if pieces:
                     kg_lines = '<br/>'.join(
                         [f"Pc{p['piece_number']}: {float(p['weight_kg']):.1f}" for p in pieces])
                     lbs_lines = '<br/>'.join(
                         [f"Pc{p['piece_number']}: {float(p['weight_kg']) * KG_TO_LBS:.1f}" for p in pieces])
+                elif from_kg is not None and to_kg is not None:
+                    kg_lines = f"From: {float(from_kg):.3f}<br/>To: {float(to_kg):.3f}"
+                    lbs_lines = _fmt_weight_range(float(from_kg), float(to_kg))
                 else:
                     kg_lines = '-'
                     lbs_lines = '-'
@@ -819,7 +838,7 @@ def _build_bpl_box_tables(elements, bpl_data: Dict[str, Any], styles, accent_col
                 piece_style = ParagraphStyle('PieceCell', fontSize=8, leading=11)
                 table_data.append([
                     str(box.get('box_number', '')),
-                    str(len(pieces)),
+                    str(box.get('num_pieces', len(pieces))),
                     Paragraph(kg_lines, piece_style),
                     Paragraph(lbs_lines, piece_style),
                     f"{box_total_kg:.1f}",
@@ -851,14 +870,21 @@ def _build_bpl_box_tables(elements, bpl_data: Dict[str, Any], styles, accent_col
 
             for box in boxes:
                 pieces = box.get('pieces', [])
-                piece_weights = [f"Pc{p['piece_number']}: {float(p['weight_kg']):.1f}" for p in pieces]
-                piece_str = ', '.join(piece_weights) if piece_weights else '-'
+                from_kg = box.get('weight_range_from_kg')
+                to_kg = box.get('weight_range_to_kg')
+                if pieces:
+                    piece_weights = [f"Pc{p['piece_number']}: {float(p['weight_kg']):.1f}" for p in pieces]
+                    piece_str = ', '.join(piece_weights)
+                elif from_kg is not None and to_kg is not None:
+                    piece_str = f"From: {float(from_kg):.3f} / To: {float(to_kg):.3f}"
+                else:
+                    piece_str = '-'
                 box_total_kg = sum(float(p['weight_kg']) for p in pieces) if pieces else float(box.get('net_weight_kg', 0))
                 item_total_kg += box_total_kg
 
                 table_data.append([
                     str(box.get('box_number', '')),
-                    str(len(pieces)),
+                    str(box.get('num_pieces', len(pieces))),
                     Paragraph(piece_str, ParagraphStyle('PieceCell', fontSize=9, leading=12)),
                     f"{box_total_kg:.1f}",
                 ])
