@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from psycopg2 import pool
 from app.core.settings import settings
 
@@ -28,3 +29,11 @@ def get_connection():
 
 def release_connection(conn):
     db_pool.putconn(conn)
+
+@contextmanager
+def get_conn():
+    conn = db_pool.getconn()
+    try:
+        yield conn
+    finally:
+        db_pool.putconn(conn)
