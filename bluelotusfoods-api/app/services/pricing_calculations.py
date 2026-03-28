@@ -3,7 +3,54 @@ Pricing calculation utilities for buyer pricing estimates.
 """
 
 from decimal import Decimal
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+import re
+
+# Canonical conversion factor: 1 kg = 2.205 lbs
+KG_TO_LBS = Decimal('2.205')
+
+
+def kg_to_lbs(kg: Decimal) -> Decimal:
+    """Convert kilograms to pounds."""
+    return kg * KG_TO_LBS
+
+
+def lbs_to_kg(lbs: Decimal) -> Decimal:
+    """Convert pounds to kilograms."""
+    return lbs / KG_TO_LBS
+
+
+def convert_fish_size_to_lbs(fish_size: Optional[str]) -> Optional[str]:
+    """
+    Convert a fish size string from kg to lbs (no unit suffix in output).
+    Examples:
+      "2-3 kg" -> "4.4-6.6"
+      "0.5 kg" -> "1.1"
+      "45"     -> "99.2"
+      "5+ kg"  -> "11.0+"
+    """
+    if not fish_size:
+        return None
+
+    s = str(fish_size).strip()
+
+    range_match = re.match(r'(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\s*(?:kg)?', s.lower())
+    if range_match:
+        min_lbs = float(range_match.group(1)) * float(KG_TO_LBS)
+        max_lbs = float(range_match.group(2)) * float(KG_TO_LBS)
+        return f"{min_lbs:.1f}-{max_lbs:.1f}"
+
+    plus_match = re.match(r'(\d+\.?\d*)\s*\+\s*(?:kg)?', s.lower())
+    if plus_match:
+        lbs = float(plus_match.group(1)) * float(KG_TO_LBS)
+        return f"{lbs:.1f}+"
+
+    single_match = re.match(r'(\d+\.?\d*)\s*(?:kg)?$', s.lower())
+    if single_match:
+        lbs = float(single_match.group(1)) * float(KG_TO_LBS)
+        return f"{lbs:.1f}"
+
+    return s
 
 
 def _dec(config: Dict[str, Any], key: str) -> Decimal:
@@ -82,9 +129,9 @@ def calculate_estimate_totals(estimate: Dict[str, Any]) -> Dict[str, Any]:
     tariff_percent = Decimal(str(estimate.get('tariff_percent', 0)))
     margin = Decimal(str(estimate.get('margin', 0)))
 
-    fish_price_with_tariff = calculate_fish_price_with_tariff(fish_price, tariff_percent)
-    tariff_amount = fish_price_with_tariff - fish_price
-    total = calculate_total_price(fish_price, freight_price, tariff_percent, margin)
+    tariff_amount = calculate_tariff_amount(fish_price, tariff_percent)
+    fish_price_with_tariff = fish_price + tariff_amount
+    total = fish_price_with_tariff + margin + freight_price
 
     return {
         **estimate,

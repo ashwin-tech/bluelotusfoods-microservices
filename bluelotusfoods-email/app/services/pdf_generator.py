@@ -754,7 +754,7 @@ def _fmt_weight_range(from_kg: float, to_kg: float) -> str:
     If >= 1 lb → round to nearest 0.5 lb.
     """
     def kg_to_display(kg: float) -> str:
-        lbs = kg * 2.20462
+        lbs = kg * 2.205
         if lbs < 1.0:
             return f"{round(lbs * 16)}oz"
         rounded = round(lbs * 2) / 2
@@ -767,7 +767,7 @@ def _build_bpl_box_tables(elements, bpl_data: Dict[str, Any], styles, accent_col
     owner_mode=True  → no size in banner, stacked weights, LBS columns, summary table
     owner_mode=False → includes size, comma-sep weights, KG only, no summary
     """
-    KG_TO_LBS = 2.20462
+    KG_TO_LBS = 2.205
     items = bpl_data.get('items', [])
 
     # Collect per-item totals for the summary table (owner only)
