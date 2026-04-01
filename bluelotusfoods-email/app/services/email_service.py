@@ -92,7 +92,7 @@ class EmailService:
             message.attach(MIMEText(email_body, "html"))
             
             # Attach PDF
-            pdf_attachment = MIMEBase('application', 'octet-stream')
+            pdf_attachment = MIMEBase('application', 'pdf')
             pdf_attachment.set_payload(pdf_data)
             encoders.encode_base64(pdf_attachment)
             pdf_attachment.add_header(
@@ -205,7 +205,7 @@ class EmailService:
             message.attach(MIMEText(email_body, "html"))
             
             # Attach PDF
-            pdf_attachment = MIMEBase('application', 'octet-stream')
+            pdf_attachment = MIMEBase('application', 'pdf')
             pdf_attachment.set_payload(pdf_data)
             encoders.encode_base64(pdf_attachment)
             pdf_attachment.add_header(
@@ -529,7 +529,7 @@ class EmailService:
             message.attach(MIMEText(email_body, "html"))
             
             # Attach PDF
-            pdf_attachment = MIMEBase('application', 'octet-stream')
+            pdf_attachment = MIMEBase('application', 'pdf')
             pdf_attachment.set_payload(pdf_data)
             encoders.encode_base64(pdf_attachment)
             pdf_attachment.add_header(
@@ -752,7 +752,7 @@ class EmailService:
             message.attach(MIMEText(email_body, "html"))
 
             # Attach PDF (same as buyer)
-            pdf_attachment = MIMEBase('application', 'octet-stream')
+            pdf_attachment = MIMEBase('application', 'pdf')
             pdf_attachment.set_payload(pdf_data)
             encoders.encode_base64(pdf_attachment)
             pdf_attachment.add_header(
@@ -975,7 +975,7 @@ class EmailService:
             """
             owner_msg.attach(MIMEText(owner_body, "html"))
 
-            owner_att = MIMEBase('application', 'octet-stream')
+            owner_att = MIMEBase('application', 'pdf')
             owner_att.set_payload(owner_pdf)
             encoders.encode_base64(owner_att)
             owner_att.add_header('Content-Disposition', f'attachment; filename="BPL_{safe_po}_{request.port_code}_BLF.pdf"')
@@ -1002,7 +1002,7 @@ class EmailService:
             """
             vendor_msg.attach(MIMEText(vendor_body, "html"))
 
-            vendor_att = MIMEBase('application', 'octet-stream')
+            vendor_att = MIMEBase('application', 'pdf')
             vendor_att.set_payload(vendor_pdf)
             encoders.encode_base64(vendor_att)
             vendor_att.add_header('Content-Disposition', f'attachment; filename="BPL_{safe_po}_{request.port_code}.pdf"')

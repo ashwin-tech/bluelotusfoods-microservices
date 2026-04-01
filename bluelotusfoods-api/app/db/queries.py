@@ -526,6 +526,30 @@ UPDATE_PO_STATUS = """
     UPDATE purchase_order SET status = %s, updated_at = NOW() WHERE id = %s
 """
 
+UPDATE_PO_FULFILLED_WEIGHT = """
+    UPDATE purchase_order
+    SET fulfilled_weight_kg = %s,
+        fulfilled_weight_lbs = ROUND(CAST(%s AS numeric) * 2.205, 2),
+        updated_at = NOW()
+    WHERE id = %s
+"""
+
+GET_BPL_TOTAL_WEIGHT_FOR_PO = """
+    SELECT COALESCE(SUM(
+        CASE
+            WHEN bpi.net_weight_kg IS NOT NULL THEN bpi.net_weight_kg
+            ELSE (
+                SELECT COALESCE(SUM(p.weight_kg), 0)
+                FROM box_packaging_list_piece p
+                WHERE p.bpl_item_id = bpi.id
+            )
+        END
+    ), 0) AS total_kg
+    FROM box_packaging_list bl
+    JOIN box_packaging_list_item bpi ON bpi.bpl_id = bl.id
+    WHERE bl.po_id = %s AND bl.status IN ('sent', 'completed')
+"""
+
 INSERT_PO_AUDIT = """
     INSERT INTO purchase_order_audit
         (po_id, from_status, to_status, actor_role, actor_name, actor_code, notes)
@@ -564,10 +588,22 @@ GET_PO_ITEMS_FULL = """
         id, fish_name, cut_name, grade_name, fish_size,
         port_code, destination_name, price_per_kg,
         airfreight_per_kg, total_per_kg,
-        order_weight_lbs, order_weight_kg
+        order_weight_lbs, order_weight_kg,
+        is_accepted, fulfilled_weight_kg, fulfilled_weight_lbs
     FROM purchase_order_item
     WHERE po_id = %s
     ORDER BY port_code, fish_name
+"""
+
+UPDATE_PO_ITEM_IS_ACCEPTED = """
+    UPDATE purchase_order_item SET is_accepted = %s WHERE id = %s
+"""
+
+UPDATE_PO_ITEM_FULFILLED_WEIGHT = """
+    UPDATE purchase_order_item
+    SET fulfilled_weight_kg = %s,
+        fulfilled_weight_lbs = ROUND(CAST(%s AS numeric) * 2.205, 2)
+    WHERE id = %s
 """
 
 GET_PORT_ACCEPTANCE = """
@@ -594,6 +630,7 @@ GET_VENDOR_POS_BY_WEEK = """
     SELECT
         po.id, po.po_number, po.quote_id, po.estimate_id,
         po.vendor_id, po.status, po.created_at,
+        po.fulfilled_weight_kg, po.fulfilled_weight_lbs,
         be.estimate_number,
         (SELECT COUNT(*) FROM purchase_order_item poi WHERE poi.po_id = po.id) as item_count
     FROM purchase_order po
@@ -608,6 +645,7 @@ GET_VENDOR_POS_ALL = """
     SELECT
         po.id, po.po_number, po.quote_id, po.estimate_id,
         po.vendor_id, po.status, po.created_at,
+        po.fulfilled_weight_kg, po.fulfilled_weight_lbs,
         be.estimate_number,
         (SELECT COUNT(*) FROM purchase_order_item poi WHERE poi.po_id = po.id) as item_count
     FROM purchase_order po
@@ -661,7 +699,7 @@ CHECK_PORT_ACCEPTED = """
 """
 
 GET_BPL_BY_PO_PORT = """
-    SELECT id FROM box_packaging_list
+    SELECT id, status FROM box_packaging_list
     WHERE po_id = %s AND port_code = %s
 """
 
@@ -937,6 +975,10 @@ class DatabaseQueries:
         'get_created_at': GET_PO_CREATED_AT,
         'get_audit_timestamps': GET_PO_AUDIT_TIMESTAMPS,
         'get_audit_records': GET_PO_AUDIT_RECORDS,
+        'update_fulfilled_weight': UPDATE_PO_FULFILLED_WEIGHT,
+        'get_bpl_total_weight': GET_BPL_TOTAL_WEIGHT_FOR_PO,
+        'update_item_is_accepted': UPDATE_PO_ITEM_IS_ACCEPTED,
+        'update_item_fulfilled_weight': UPDATE_PO_ITEM_FULFILLED_WEIGHT,
     }
 
     BPL = {

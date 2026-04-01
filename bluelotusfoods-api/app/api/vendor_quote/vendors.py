@@ -93,6 +93,18 @@ class PortAcceptRequest(BaseModel):
     notes: Optional[str] = None
 
 
+class SendBPLEmailRequest(BaseModel):
+    fulfilled_weight_kg: Optional[float] = None
+
+
+class UpdateItemAcceptedRequest(BaseModel):
+    is_accepted: bool
+
+
+class UpdateItemFulfilledWeightRequest(BaseModel):
+    fulfilled_weight_kg: Optional[float] = None
+
+
 def _transition_po_status(cur, po_id: int, allowed_from: list, new_status: str,
                            actor_role: str, actor_name: str, actor_code: str,
                            notes: Optional[str] = None) -> str:
@@ -119,6 +131,39 @@ def _transition_po_status(cur, po_id: int, allowed_from: list, new_status: str,
         (po_id, current_status, new_status, actor_role, actor_name, actor_code, notes)
     )
     return current_status
+
+
+@router.patch("/purchase-orders/items/{item_id}/fulfilled-weight")
+def update_po_item_fulfilled_weight(item_id: int, request: UpdateItemFulfilledWeightRequest):
+    """Persist fulfilled weight for a single PO item."""
+    with get_conn() as conn:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                kg = request.fulfilled_weight_kg
+                cur.execute(
+                    DatabaseQueries.PURCHASE_ORDERS['update_item_fulfilled_weight'],
+                    (kg, kg, item_id)
+                )
+                conn.commit()
+                return {"success": True}
+        except Exception as e:
+            logger.error(f"Error updating fulfilled weight for item {item_id}: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/purchase-orders/items/{item_id}/accept")
+def update_po_item_accepted(item_id: int, request: UpdateItemAcceptedRequest):
+    """Persist the vendor's checkbox selection for a PO item."""
+    with get_conn() as conn:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                val = 'Y' if request.is_accepted else None
+                cur.execute(DatabaseQueries.PURCHASE_ORDERS['update_item_is_accepted'], (val, item_id))
+                conn.commit()
+                return {"success": True}
+        except Exception as e:
+            logger.error(f"Error updating is_accepted for item {item_id}: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/purchase-orders/{po_id}/bpl")
@@ -208,6 +253,13 @@ def save_bpl(request: SaveBPLRequest):
                 # Check if BPL already exists for this PO+port
                 cur.execute(DatabaseQueries.BPL['get_by_po_port'], (request.po_id, request.port_code))
                 existing = cur.fetchone()
+                previous_status = existing['status'] if existing else None
+
+                if previous_status == 'sent':
+                    raise HTTPException(
+                        status_code=400,
+                        detail="BPL has already been sent and cannot be edited."
+                    )
 
                 if existing:
                     bpl_id = existing['id']
@@ -318,7 +370,7 @@ def get_vendor_purchase_orders(vendor_id: int, week_start: Optional[str] = Query
 
 
 @router.post("/purchase-orders/{po_id}/bpl/{port_code}/send-email")
-async def send_bpl_email(po_id: int, port_code: str):
+async def send_bpl_email(po_id: int, port_code: str, request: SendBPLEmailRequest = None):
     """
     Gather BPL data + vendor info for a PO/port, then call the
     email service to send branded PDF to owner and plain PDF to vendor.
@@ -451,7 +503,7 @@ async def send_bpl_email(po_id: int, port_code: str):
                 email_result = response.json()
                 logger.info(f"✅ BPL email sent: {email_result}")
 
-                # 8) Update BPL status to 'sent' in DB, then check for auto-fulfill
+                # 8) Update BPL status to 'sent', then pre-populate fulfilled weight on PO
                 if email_result.get("success"):
                     with get_conn() as conn2:
                         try:
@@ -459,31 +511,34 @@ async def send_bpl_email(po_id: int, port_code: str):
                                 cur2.execute(DatabaseQueries.BPL['update_status_sent'], (po_id, port_code))
                                 logger.info(f"Updated BPL status to 'sent' for PO {po_id} port {port_code}")
 
-                                # Auto-fulfill: if all accepted ports now have a sent/completed BPL → fulfill
-                                cur2.execute(DatabaseQueries.BPL['get_accepted_port_count'], (po_id,))
-                                accepted_count = cur2.fetchone()['cnt']
+                                # Persist fulfilled_weight_kg from the vendor-entered Fulfilled Wt value only
+                                weight_to_save = request.fulfilled_weight_kg if request and request.fulfilled_weight_kg is not None else None
+                                if weight_to_save:
+                                    cur2.execute(
+                                        DatabaseQueries.PURCHASE_ORDERS['update_fulfilled_weight'],
+                                        (weight_to_save, weight_to_save, po_id)
+                                    )
+                                    logger.info(f"Persisted fulfilled_weight_kg={weight_to_save} for PO {po_id}")
 
-                                cur2.execute(DatabaseQueries.BPL['get_sent_bpl_count'], (po_id,))
-                                sent_count = cur2.fetchone()['cnt']
-
-                                if accepted_count > 0 and sent_count >= accepted_count:
-                                    try:
-                                        _transition_po_status(
-                                            cur2, po_id,
-                                            allowed_from=['accepted'],
-                                            new_status='fulfilled',
-                                            actor_role='system',
-                                            actor_name='system',
-                                            actor_code='auto'
-                                        )
-                                        logger.info(f"PO {po_id} auto-fulfilled: all {accepted_count} accepted port(s) sent")
-                                    except HTTPException as te:
-                                        # Non-fatal: PO might already be fulfilled or in unexpected state
-                                        logger.warning(f"Auto-fulfill skipped for PO {po_id}: {te.detail}")
+                                # Mark PO as fulfilled
+                                try:
+                                    _transition_po_status(
+                                        cur2, po_id,
+                                        allowed_from=['accepted'],
+                                        new_status='fulfilled',
+                                        actor_role='system',
+                                        actor_name='BPL Send',
+                                        actor_code='system',
+                                        notes='Auto-fulfilled on BPL send',
+                                    )
+                                    logger.info(f"PO {po_id} auto-fulfilled on BPL send")
+                                except HTTPException:
+                                    # PO may already be fulfilled or in another state — ignore
+                                    pass
 
                                 conn2.commit()
                         except Exception as db_err:
-                            logger.error(f"Failed to update BPL status: {db_err}")
+                            logger.error(f"Failed to update BPL status/weight: {db_err}")
 
                 return {
                     "success": email_result.get("success", True),
@@ -690,14 +745,14 @@ def reject_port(po_id: int, port_code: str, request: PortAcceptRequest):
 class ManualFulfillRequest(BaseModel):
     actor_name: str
     actor_code: str
+    fulfilled_weight_kg: Optional[float] = None
 
 
 @router.post("/purchase-orders/{po_id}/fulfill")
 def manually_fulfill_po(po_id: int, request: ManualFulfillRequest):
     """
-    Vendor manually marks a PO as fulfilled without requiring a BPL.
-    For vendors who manage shipping details outside the portal.
-    Overrides the normal BPL-based auto-fulfill flow.
+    Vendor manually marks a PO as fulfilled.
+    Stores the confirmed fulfilled weight (kg) on the PO.
     """
     with get_conn() as conn:
         try:
@@ -709,16 +764,21 @@ def manually_fulfill_po(po_id: int, request: ManualFulfillRequest):
                     actor_role='vendor',
                     actor_name=request.actor_name,
                     actor_code=request.actor_code,
-                    notes='Manually marked fulfilled by vendor (no BPL)',
+                    notes='Marked fulfilled by vendor',
                 )
+                if request.fulfilled_weight_kg is not None:
+                    cur.execute(
+                        DatabaseQueries.PURCHASE_ORDERS['update_fulfilled_weight'],
+                        (request.fulfilled_weight_kg, request.fulfilled_weight_kg, po_id)
+                    )
                 conn.commit()
-                logger.info(f"PO {po_id} manually fulfilled by vendor {request.actor_code}")
+                logger.info(f"PO {po_id} fulfilled by vendor {request.actor_code}, weight={request.fulfilled_weight_kg}")
                 return {"success": True, "po_id": po_id, "po_status": "fulfilled"}
         except HTTPException:
             raise
         except Exception as e:
             conn.rollback()
-            logger.error(f"Error manually fulfilling PO {po_id}: {str(e)}")
+            logger.error(f"Error fulfilling PO {po_id}: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -2,6 +2,7 @@
 PDF generation service for buyer estimates
 """
 import os
+import html as _html
 from datetime import datetime
 from typing import Dict, List, Any
 from decimal import Decimal
@@ -15,6 +16,10 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 
 # Logo path
 LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'BLF-Logo.png')
+
+def esc(value) -> str:
+    """Escape a value for safe use inside a ReportLab Paragraph (XML context)."""
+    return _html.escape(str(value) if value is not None else '')
 
 def add_page_footer(canvas, doc):
     """Add footer with page numbers and continuation notice"""
@@ -232,7 +237,7 @@ def generate_estimate_pdf(estimate_data: Dict[str, Any], items: List[Dict[str, A
         # Create info table with fish details
         fish_info_data = [
             ['Common Name:', group_data['common_name'], 'Scientific Name:', group_data.get('scientific_name', 'N/A'), 'Port:', group_data['port_code']],
-            ['Grade/Cut:', f"{group_data['grade_name']} / {group_data['cut_name']}", 'Size:', format_fish_size(group_data.get('fish_size')) if group_data.get('fish_size') else 'N/A', '', '']
+            ['Grade/Cut:', f"{esc(group_data['grade_name'])} / {esc(group_data['cut_name'])}", 'Size:', format_fish_size(group_data.get('fish_size')) if group_data.get('fish_size') else 'N/A', '', '']
         ]
         
         fish_info_table = Table(fish_info_data, colWidths=[1.2*inch, 1.8*inch, 1.3*inch, 1.8*inch, 0.7*inch, 0.7*inch])
@@ -457,12 +462,12 @@ def generate_vendor_quote_pdf(quote_data: dict) -> bytes:
         
         for size in quote_data['sizes']:
             prod_data.append([
-                Paragraph(str(size['fish_type']), cell_style),
-                Paragraph(str(size['cut_name']), cell_style_center),
-                Paragraph(str(size['grade_name']), cell_style_center),
-                Paragraph(str(size['weight_range']), cell_style_center),
+                Paragraph(esc(size['fish_type']), cell_style),
+                Paragraph(esc(size['cut_name']), cell_style_center),
+                Paragraph(esc(size['grade_name']), cell_style_center),
+                Paragraph(esc(size['weight_range']), cell_style_center),
                 Paragraph(f"${size['price_per_kg']}", cell_style_center),
-                Paragraph(str(size['quantity']), cell_style_center)
+                Paragraph(esc(size['quantity']), cell_style_center)
             ])
         
         prod_table = Table(prod_data, colWidths=[2*inch, 1*inch, 1*inch, 1*inch, 1*inch, 1*inch], repeatRows=1)
@@ -536,10 +541,10 @@ def generate_vendor_quote_pdf(quote_data: dict) -> bytes:
                 price_per_kg = float(size.get('price_per_kg', 0))
                 total_per_kg = airfreight + price_per_kg
                 sum_data.append([
-                    Paragraph(str(size.get('fish_type', '-')), cell_normal),
-                    Paragraph(str(size.get('cut_name', '-')), cell_center),
-                    Paragraph(str(size.get('grade_name', '-')), cell_center),
-                    Paragraph(str(size.get('weight_range', '-')), cell_center),
+                    Paragraph(esc(size.get('fish_type', '-')), cell_normal),
+                    Paragraph(esc(size.get('cut_name', '-')), cell_center),
+                    Paragraph(esc(size.get('grade_name', '-')), cell_center),
+                    Paragraph(esc(size.get('weight_range', '-')), cell_center),
                     Paragraph(f"${airfreight:.2f}", cell_right),
                     Paragraph(f"${price_per_kg:.2f}", cell_right),
                     Paragraph(f"${total_per_kg:.2f}", cell_right_bold),
@@ -565,7 +570,7 @@ def generate_vendor_quote_pdf(quote_data: dict) -> bytes:
     if quote_data.get('notes'):
         elements.append(Spacer(1, 0.2*inch))
         elements.append(Paragraph("<b>Notes:</b>", styles['Heading3']))
-        elements.append(Paragraph(quote_data['notes'], styles['Normal']))
+        elements.append(Paragraph(esc(quote_data['notes']), styles['Normal']))
     
     # Build PDF
     doc.build(elements)
@@ -657,7 +662,7 @@ def generate_bpl_owner_pdf(bpl_data: Dict[str, Any]) -> bytes:
     if notes:
         elements.append(Spacer(1, 0.15*inch))
         elements.append(Paragraph("<b>Notes:</b>", styles['Normal']))
-        elements.append(Paragraph(notes, styles['Normal']))
+        elements.append(Paragraph(esc(notes), styles['Normal']))
 
     doc.build(elements)
     pdf_bytes = buffer.getvalue()
@@ -695,11 +700,11 @@ def generate_bpl_vendor_pdf(bpl_data: Dict[str, Any]) -> bytes:
     vendor_country = bpl_data.get('vendor_country', '')
     vendor_email = bpl_data.get('vendor_email', '')
 
-    vendor_lines = [f"<b>{vendor_name}</b>"]
+    vendor_lines = [f"<b>{esc(vendor_name)}</b>"]
     if vendor_country:
-        vendor_lines.append(vendor_country)
+        vendor_lines.append(esc(vendor_country))
     if vendor_email:
-        vendor_lines.append(vendor_email)
+        vendor_lines.append(esc(vendor_email))
 
     elements.append(Paragraph("<br/>".join(vendor_lines), ParagraphStyle(
         'VendorInfo', fontSize=11, textColor=dark, spaceAfter=10)))
@@ -740,7 +745,7 @@ def generate_bpl_vendor_pdf(bpl_data: Dict[str, Any]) -> bytes:
     if notes:
         elements.append(Spacer(1, 0.15*inch))
         elements.append(Paragraph("<b>Notes:</b>", styles['Normal']))
-        elements.append(Paragraph(notes, styles['Normal']))
+        elements.append(Paragraph(esc(notes), styles['Normal']))
 
     doc.build(elements)
     pdf_bytes = buffer.getvalue()
@@ -774,10 +779,10 @@ def _build_bpl_box_tables(elements, bpl_data: Dict[str, Any], styles, accent_col
     summary_rows = []  # list of (label, total_kg, total_lbs)
 
     for item in items:
-        fish_label = item.get('fish_name', '')
-        cut_label = item.get('cut_name', '')
-        grade_label = item.get('grade_name', '')
-        size_label = item.get('fish_size') or ''
+        fish_label = esc(item.get('fish_name', ''))
+        cut_label = esc(item.get('cut_name', ''))
+        grade_label = esc(item.get('grade_name', ''))
+        size_label = esc(item.get('fish_size') or '')
 
         sub_header_text = f"{fish_label} · {cut_label} · {grade_label}"
         if not owner_mode and size_label:
