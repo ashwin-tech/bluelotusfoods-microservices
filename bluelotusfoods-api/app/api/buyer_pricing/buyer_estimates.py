@@ -651,3 +651,19 @@ async def get_pos_by_estimate(estimate_id: int):
         except Exception as e:
             logger.error(f"Error fetching POs for estimate {estimate_id}: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/reports/fulfilled-pos")
+def get_fulfilled_pos_report():
+    """
+    Report: all fulfilled PO items with clearing bracket, total clearing price,
+    and clearing per lb computed in SQL from actual fulfilled weight.
+    """
+    with get_conn() as conn:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(DatabaseQueries.PURCHASE_ORDERS['get_fulfilled_report'])
+                return {"success": True, "items": [dict(r) for r in cur.fetchall()]}
+        except Exception as e:
+            logger.error(f"Error fetching fulfilled PO report: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))

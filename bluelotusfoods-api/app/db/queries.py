@@ -606,6 +606,126 @@ UPDATE_PO_ITEM_FULFILLED_WEIGHT = """
     WHERE id = %s
 """
 
+GET_FULFILLED_PO_REPORT = """
+    WITH raw AS (
+        -- One row per accepted fulfilled PO item, plus PO-level aggregates via window functions.
+        -- po_total_invoice drives the clearing bracket for the whole consignment.
+        -- po_has_simp = true if ANY species in the PO requires SIMP filing.
+        SELECT
+            po.id                                                   AS po_id,
+            po.po_number,
+            po.quote_id,
+            be.id                                                   AS estimate_id,
+            be.estimate_number,
+            be.company_id,
+            c.name                                                  AS company_name,
+            v.code                                                  AS vendor_code,
+            poi.fish_name,
+            poi.cut_name,
+            poi.grade_name,
+            poi.fish_size,
+            poi.port_code,
+            poi.total_per_kg                                        AS vendor_price_per_kg,
+            poi.fulfilled_weight_kg,
+            poi.fulfilled_weight_lbs,
+            bei.price                                               AS buyer_price_per_lb,
+            bei.margin                                              AS margin_per_lb,
+            cc.custom_entry_fee,
+            cc.airline_service_fee,
+            cc.prior_notice_pre_fda,
+            cc.food_and_drug_service,
+            cc.tariff_filing,
+            cc.simp_filing,
+            cc.customs_tax_per_10000,
+            cc.customs_tax_per_20000,
+            cc.customs_tax_per_30000,
+            -- PO-level total fulfilled lbs (all species combined)
+            SUM(poi.fulfilled_weight_lbs)
+                OVER (PARTITION BY po.id)                           AS po_total_lbs,
+            -- PO-level total invoice value (drives bracket selection)
+            SUM(CASE
+                WHEN poi.fulfilled_weight_lbs > 0 AND bei.fish_price IS NOT NULL
+                THEN poi.fulfilled_weight_lbs * (
+                    bei.fish_price
+                    + bei.fish_price * bei.tariff_percent / 100.0
+                    + bei.margin
+                    + bei.freight_price
+                )
+                ELSE 0
+            END) OVER (PARTITION BY po.id)                          AS po_total_invoice,
+            -- SIMP applies to whole consignment if any species needs it
+            BOOL_OR(COALESCE(fssa.is_simp_applicable, false))
+                OVER (PARTITION BY po.id)                           AS po_has_simp
+        FROM purchase_order po
+        JOIN purchase_order_item poi
+            ON  poi.po_id       = po.id
+            AND poi.is_accepted = 'Y'
+        JOIN buyer_estimate be      ON be.id        = po.estimate_id
+        JOIN company c              ON c.id         = be.company_id
+        JOIN vendors v              ON v.id         = po.vendor_id
+        JOIN clearing_charges cc    ON cc.is_active = true
+        LEFT JOIN LATERAL (
+            SELECT *
+            FROM buyer_estimate_item bei
+            WHERE bei.buyer_estimate_id             = po.estimate_id
+              AND bei.vendor_id                     = po.vendor_id
+              AND bei.port_code                     = poi.port_code
+              AND COALESCE(bei.fish_size, '')        = COALESCE(poi.fish_size, '')
+              AND EXISTS (SELECT 1 FROM fish_species fs WHERE fs.id = bei.fish_species_id AND fs.common_name = poi.fish_name)
+              AND EXISTS (SELECT 1 FROM fish_cut     fc WHERE fc.id = bei.cut_id          AND fc.name        = poi.cut_name)
+              AND EXISTS (SELECT 1 FROM fish_grade   fg WHERE fg.id = bei.grade_id        AND fg.name        = poi.grade_name)
+            LIMIT 1
+        ) bei ON true
+        LEFT JOIN LATERAL (
+            SELECT is_simp_applicable
+            FROM fish_species_simp_applicable
+            WHERE fish_species_id = bei.fish_species_id
+            LIMIT 1
+        ) fssa ON true
+        WHERE po.status = 'fulfilled'
+    ),
+    cleared AS (
+        -- Compute the single PO-level clearing total, then allocate per species by weight %.
+        SELECT
+            *,
+            CASE
+                WHEN po_total_invoice <= 10000 THEN '$10k'
+                WHEN po_total_invoice <= 20000 THEN '$20k'
+                ELSE '$30k'
+            END                                                     AS clearing_bracket,
+            (
+                custom_entry_fee + airline_service_fee + prior_notice_pre_fda +
+                food_and_drug_service + tariff_filing +
+                CASE WHEN po_has_simp THEN simp_filing ELSE 0 END +
+                CASE
+                    WHEN po_total_invoice <= 10000 THEN customs_tax_per_10000
+                    WHEN po_total_invoice <= 20000 THEN customs_tax_per_20000
+                    ELSE customs_tax_per_30000
+                END
+            )                                                       AS po_total_clearing
+        FROM raw
+        WHERE po_total_invoice > 0
+    )
+    SELECT
+        po_id, po_number, quote_id,
+        estimate_id, estimate_number, company_id, company_name,
+        vendor_code, fish_name, cut_name, grade_name, fish_size, port_code,
+        vendor_price_per_kg, fulfilled_weight_kg, fulfilled_weight_lbs,
+        buyer_price_per_lb, margin_per_lb,
+        clearing_bracket,
+        -- Weight share of this species within the PO
+        ROUND((fulfilled_weight_lbs / po_total_lbs * 100)::numeric, 1)
+                                                                    AS weight_pct,
+        -- Clearing total allocated to this species (proportional to weight)
+        ROUND((po_total_clearing * fulfilled_weight_lbs / po_total_lbs)::numeric, 2)
+                                                                    AS total_clearing_price,
+        -- Clearing per lb is uniform across all items in the same PO
+        ROUND((po_total_clearing / po_total_lbs)::numeric, 4)
+                                                                    AS clearing_per_lb
+    FROM cleared
+    ORDER BY company_name, po_id DESC, fish_name
+"""
+
 GET_PORT_ACCEPTANCE = """
     SELECT port_code, status FROM purchase_order_port_acceptance
     WHERE po_id = %s ORDER BY port_code
@@ -979,6 +1099,7 @@ class DatabaseQueries:
         'get_bpl_total_weight': GET_BPL_TOTAL_WEIGHT_FOR_PO,
         'update_item_is_accepted': UPDATE_PO_ITEM_IS_ACCEPTED,
         'update_item_fulfilled_weight': UPDATE_PO_ITEM_FULFILLED_WEIGHT,
+        'get_fulfilled_report': GET_FULFILLED_PO_REPORT,
     }
 
     BPL = {

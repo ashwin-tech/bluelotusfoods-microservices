@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import psycopg2
 from psycopg2 import pool
 from app.core.settings import settings
 
@@ -33,7 +34,24 @@ def release_connection(conn):
 @contextmanager
 def get_conn():
     conn = db_pool.getconn()
+    # Validate connection — replace if stale (e.g. after Cloud Run idle period)
+    if conn.closed != 0:
+        db_pool.putconn(conn, close=True)
+        conn = db_pool.getconn()
+    else:
+        try:
+            conn.cursor().execute("SELECT 1")
+            conn.rollback()
+        except psycopg2.Error:
+            db_pool.putconn(conn, close=True)
+            conn = db_pool.getconn()
     try:
         yield conn
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         db_pool.putconn(conn)
