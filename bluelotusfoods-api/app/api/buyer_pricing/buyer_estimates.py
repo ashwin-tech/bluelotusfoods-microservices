@@ -499,75 +499,103 @@ class CreatePORequest(BaseModel):
     items: List[POItemRequest]
     delivery_date_from: Optional[str] = None
     delivery_date_to: Optional[str] = None
+    # Per-port delivery dates; override global dates when present
+    port_dates: Optional[dict] = None  # {port_code: {from: str, to: str}}
 
 
 @router.post("/purchase-orders/create")
 async def create_purchase_order(request: CreatePORequest):
     """
-    Create a purchase order. PO number = PO-{quote_id}-{estimate_id}-{vendor_code}.
-    Since estimate_number = EST-YYYY-MM-{id}, the estimate_id IS the suffix.
-    Vendor code is looked up from the vendors table using vendor_id.
-    One PO per quote+estimate+vendor combination (enforced by unique constraint).
+    Create one PO per port. PO number = PO-{quote_id}-{estimate_id}-{vendor_code}-{port_code}.
+    Items are split by port_code; each port gets its own PO.
     """
     if not request.items:
         raise HTTPException(status_code=400, detail="At least one PO item is required")
 
+    # Group items by port_code
+    from collections import defaultdict
+    items_by_port: dict = defaultdict(list)
+    for item in request.items:
+        items_by_port[item.port_code].append(item)
+
     with get_conn() as conn:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Look up vendor_code from vendors table
+                # Look up vendor_code
                 cur.execute(DatabaseQueries.VENDORS['get_code'], (request.vendor_id,))
                 vendor_row = cur.fetchone()
                 if not vendor_row:
                     raise HTTPException(status_code=404, detail=f"Vendor {request.vendor_id} not found")
                 vendor_code = vendor_row['code']
 
-                # PO number uses estimate_id directly (matches estimate_number suffix)
-                po_number = f"PO-{request.quote_id}-{request.estimate_id}-{vendor_code}"
+                created = []
+                skipped = []
 
-                # Check if PO already exists
-                cur.execute(
-                    DatabaseQueries.PURCHASE_ORDERS['check_exists'],
-                    (request.quote_id, request.estimate_id, request.vendor_id)
-                )
-                existing = cur.fetchone()
-                if existing:
-                    return {
-                        "success": False,
-                        "detail": f"PO {existing['po_number']} already exists (status: {existing['status']})",
-                        "po_number": existing['po_number'],
-                        "po_id": existing['id']
-                    }
+                for port_code, port_items in items_by_port.items():
+                    po_number = f"PO-{request.quote_id}-{request.estimate_id}-{vendor_code}-{port_code}"
 
-                # Insert PO header
-                cur.execute(
-                    DatabaseQueries.PURCHASE_ORDERS['insert'],
-                    (po_number, request.quote_id, request.estimate_id, request.vendor_id,
-                     request.delivery_date_from, request.delivery_date_to)
-                )
-                po_row = cur.fetchone()
-                po_id = po_row['id']
-
-                # Insert PO items
-                for item in request.items:
+                    # Check if PO already exists for this port
                     cur.execute(
-                        DatabaseQueries.PURCHASE_ORDERS['insert_item'],
-                        (po_id, item.fish_name, item.cut_name, item.grade_name, item.fish_size,
-                         item.port_code, item.destination_name, item.price_per_kg,
-                         item.airfreight_per_kg, item.total_per_kg,
-                         item.order_weight_lbs, item.order_weight_kg)
+                        DatabaseQueries.PURCHASE_ORDERS['check_exists'],
+                        (request.quote_id, request.estimate_id, request.vendor_id, port_code)
                     )
+                    existing = cur.fetchone()
+                    if existing and existing['status'] in ('sent', 'accepted'):
+                        skipped.append({
+                            "po_id": existing['id'],
+                            "po_number": existing['po_number'],
+                            "port_code": port_code,
+                            "status": existing['status'],
+                        })
+                        continue
+
+                    # Per-port delivery dates take priority over global
+                    port_date = (request.port_dates or {}).get(port_code, {})
+                    date_from = port_date.get('from') or request.delivery_date_from
+                    date_to = port_date.get('to') or request.delivery_date_to
+
+                    # Insert PO header
+                    cur.execute(
+                        DatabaseQueries.PURCHASE_ORDERS['insert'],
+                        (po_number, request.quote_id, request.estimate_id, request.vendor_id,
+                         port_code, date_from, date_to)
+                    )
+                    po_row = cur.fetchone()
+                    po_id = po_row['id']
+
+                    # Insert items for this port
+                    for item in port_items:
+                        cur.execute(
+                            DatabaseQueries.PURCHASE_ORDERS['insert_item'],
+                            (po_id, item.fish_name, item.cut_name, item.grade_name, item.fish_size,
+                             item.port_code, item.destination_name, item.price_per_kg,
+                             item.airfreight_per_kg, item.total_per_kg,
+                             item.order_weight_lbs, item.order_weight_kg)
+                        )
+
+                    created.append({
+                        "po_id": po_id,
+                        "po_number": po_number,
+                        "port_code": port_code,
+                        "status": "sent",
+                        "created_at": str(po_row['created_at']),
+                        "item_count": len(port_items),
+                    })
+                    logger.info(f"Created PO {po_number} with {len(port_items)} items")
 
                 conn.commit()
 
-                logger.info(f"Created PO {po_number} with {len(request.items)} items")
+                all_pos = created + skipped
+                # Backwards-compatible single-PO fields (first created or first skipped)
+                first = created[0] if created else skipped[0] if skipped else {}
                 return {
-                    "success": True,
-                    "po_id": po_id,
-                    "po_number": po_number,
-                    "status": "sent",
-                    "created_at": str(po_row['created_at']),
-                    "item_count": len(request.items)
+                    "success": len(created) > 0,
+                    "purchase_orders": all_pos,
+                    # Legacy single-PO fields for backwards compat
+                    "po_id": first.get("po_id"),
+                    "po_number": first.get("po_number"),
+                    "item_count": sum(p.get("item_count", 0) for p in created),
+                    "detail": f"{len(skipped)} port(s) already had a PO" if skipped and not created else None,
                 }
 
         except Exception as e:
@@ -632,21 +660,16 @@ async def get_pos_by_estimate(estimate_id: int):
                 cur.execute(DatabaseQueries.PURCHASE_ORDERS['get_by_estimate'], (estimate_id,))
 
                 rows = cur.fetchall()
-                # Build a dict keyed by vendor_id for easy lookup
-                pos_by_vendor: dict = {}
+                pos = []
                 for row in rows:
-                    vid = row['vendor_id']
-                    pos_by_vendor[vid] = dict(row)
-                    # Convert datetime to string
-                    pos_by_vendor[vid]['created_at'] = str(row['created_at'])
-
-                # Fetch items for each PO so the buyer can see what weights were ordered
-                for po_dict in pos_by_vendor.values():
-                    cur.execute(DatabaseQueries.PURCHASE_ORDERS['get_items_summary'], (po_dict['id'],))
+                    po_dict = dict(row)
+                    po_dict['created_at'] = str(row['created_at'])
+                    cur.execute(DatabaseQueries.PURCHASE_ORDERS['get_items_summary'], (row['po_id'],))
                     po_dict['items'] = [dict(r) for r in cur.fetchall()]
-                    logger.info(f"[get_pos_by_estimate] estimate={estimate_id} po={po_dict['po_number']} items={len(po_dict['items'])}")
+                    logger.info(f"[get_pos_by_estimate] estimate={estimate_id} po={po_dict['po_number']} port={po_dict.get('port_code')} items={len(po_dict['items'])}")
+                    pos.append(po_dict)
 
-                return {"success": True, "purchase_orders": pos_by_vendor}
+                return {"success": True, "purchase_orders": pos}
 
         except Exception as e:
             logger.error(f"Error fetching POs for estimate {estimate_id}: {str(e)}")
@@ -654,15 +677,24 @@ async def get_pos_by_estimate(estimate_id: int):
 
 
 @router.get("/reports/fulfilled-pos")
-def get_fulfilled_pos_report():
+def get_fulfilled_pos_report(week_start: Optional[str] = None):
     """
-    Report: all fulfilled PO items with clearing bracket, total clearing price,
-    and clearing per lb computed in SQL from actual fulfilled weight.
+    Report: fulfilled PO items for the given week (Monday–Sunday).
+    week_start must be an ISO date string (YYYY-MM-DD); defaults to current week.
     """
+    from datetime import date, timedelta
+    try:
+        ws = date.fromisoformat(week_start) if week_start else date.today()
+        # Normalise to Monday
+        ws = ws - timedelta(days=ws.weekday())
+        we = ws + timedelta(days=7)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="week_start must be YYYY-MM-DD")
+
     with get_conn() as conn:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(DatabaseQueries.PURCHASE_ORDERS['get_fulfilled_report'])
+                cur.execute(DatabaseQueries.PURCHASE_ORDERS['get_fulfilled_report'], (ws, we))
                 return {"success": True, "items": [dict(r) for r in cur.fetchall()]}
         except Exception as e:
             logger.error(f"Error fetching fulfilled PO report: {str(e)}")

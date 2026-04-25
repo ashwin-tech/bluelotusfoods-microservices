@@ -29,11 +29,10 @@ def get_purchase_order_items(po_id: int):
                 cur.execute(DatabaseQueries.PURCHASE_ORDERS['get_items_full'], (po_id,))
                 items = [dict(row) for row in cur.fetchall()]
 
-                # Get accepted and rejected ports for this PO
-                cur.execute(DatabaseQueries.PURCHASE_ORDERS['get_port_acceptance'], (po_id,))
-                port_rows = cur.fetchall()
-                accepted_ports = [r['port_code'] for r in port_rows if r['status'] == 'accepted']
-                rejected_ports = [r['port_code'] for r in port_rows if r['status'] == 'rejected']
+                # Derive accepted/rejected ports from PO status (one port per PO)
+                port_code = po_header.get('port_code') or (items[0]['port_code'] if items else '')
+                accepted_ports = [port_code] if po_header['status'] == 'accepted' else []
+                rejected_ports = [port_code] if po_header['status'] == 'rejected' else []
 
                 po = dict(po_header)
                 po['created_at'] = str(po_header['created_at'])
@@ -611,21 +610,10 @@ def reject_purchase_order(po_id: int, request: POStatusTransitionRequest):
             raise HTTPException(status_code=500, detail=str(e))
 
 
-def _get_port_lists(cur, po_id: int) -> tuple:
-    """Return (accepted_ports, rejected_ports) for a PO."""
-    cur.execute(DatabaseQueries.PURCHASE_ORDERS['get_port_acceptance'], (po_id,))
-    rows = cur.fetchall()
-    return (
-        [r['port_code'] for r in rows if r['status'] == 'accepted'],
-        [r['port_code'] for r in rows if r['status'] == 'rejected'],
-    )
-
-
 @router.post("/purchase-orders/{po_id}/ports/{port_code}/accept")
 def accept_port(po_id: int, port_code: str, request: PortAcceptRequest):
     """
-    Vendor accepts a specific port. Toggleable — can flip a rejected port back to accepted.
-    Transitions PO from 'sent' → 'accepted' on first port acceptance.
+    Vendor accepts this PO (one PO = one port). Transitions: sent/rejected → accepted.
     """
     with get_conn() as conn:
         try:
@@ -634,41 +622,28 @@ def accept_port(po_id: int, port_code: str, request: PortAcceptRequest):
                 po = cur.fetchone()
                 if not po:
                     raise HTTPException(status_code=404, detail="Purchase order not found")
-                if po['status'] in ('rejected', 'cancelled'):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Cannot accept port on a '{po['status']}' PO"
-                    )
+                if po['status'] == 'cancelled':
+                    raise HTTPException(status_code=400, detail="Cannot accept a cancelled PO")
 
-                # Upsert port with status = 'accepted'
-                cur.execute(
-                    DatabaseQueries.PURCHASE_ORDERS['upsert_port_acceptance'],
-                    (po_id, port_code, 'accepted', request.actor_name, request.actor_code, request.notes)
-                )
-
-                # Transition PO status based on current state
-                if po['status'] == 'sent':
-                    # First acceptance — move to accepted
+                if po['status'] in ('sent', 'rejected'):
                     cur.execute(DatabaseQueries.PURCHASE_ORDERS['update_status'], ('accepted', po_id))
                     cur.execute(
                         DatabaseQueries.PURCHASE_ORDERS['insert_audit'],
-                        (po_id, 'sent', 'accepted', 'vendor', request.actor_name, request.actor_code,
-                         f"Port {port_code} accepted")
+                        (po_id, po['status'], 'accepted', 'vendor',
+                         request.actor_name, request.actor_code, f"Port {port_code} accepted")
                     )
                 elif po['status'] == 'fulfilled':
-                    # New port accepted after fulfill — revert to accepted (new port has no BPL yet)
                     cur.execute(DatabaseQueries.PURCHASE_ORDERS['update_status'], ('accepted', po_id))
                     cur.execute(
                         DatabaseQueries.PURCHASE_ORDERS['insert_audit'],
-                        (po_id, 'fulfilled', 'accepted', 'vendor', request.actor_name, request.actor_code,
-                         f"Port {port_code} accepted — awaiting BPL")
+                        (po_id, 'fulfilled', 'accepted', 'vendor',
+                         request.actor_name, request.actor_code, f"Port {port_code} accepted — awaiting BPL")
                     )
 
-                accepted_ports, rejected_ports = _get_port_lists(cur, po_id)
                 conn.commit()
-                logger.info(f"Port {port_code} accepted for PO {po_id} by {request.actor_code}")
+                logger.info(f"PO {po_id} port {port_code} accepted by {request.actor_code}")
                 return {"success": True, "po_id": po_id, "port_code": port_code,
-                        "accepted_ports": accepted_ports, "rejected_ports": rejected_ports}
+                        "accepted_ports": [port_code], "rejected_ports": []}
 
         except HTTPException:
             raise
@@ -681,8 +656,7 @@ def accept_port(po_id: int, port_code: str, request: PortAcceptRequest):
 @router.post("/purchase-orders/{po_id}/ports/{port_code}/reject")
 def reject_port(po_id: int, port_code: str, request: PortAcceptRequest):
     """
-    Vendor rejects a specific port. Toggleable — can flip an accepted port to rejected.
-    If no accepted ports remain and PO is 'accepted', reverts PO back to 'sent'.
+    Vendor rejects this PO (one PO = one port). Transitions: sent/accepted → rejected.
     """
     with get_conn() as conn:
         try:
@@ -691,48 +665,24 @@ def reject_port(po_id: int, port_code: str, request: PortAcceptRequest):
                 po = cur.fetchone()
                 if not po:
                     raise HTTPException(status_code=404, detail="Purchase order not found")
-                if po['status'] in ('rejected', 'cancelled', 'fulfilled'):
+                if po['status'] in ('cancelled', 'fulfilled'):
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Cannot change port status on a '{po['status']}' PO"
+                        detail=f"Cannot reject a '{po['status']}' PO"
                     )
 
-                # Upsert port with status = 'rejected'
-                cur.execute(
-                    DatabaseQueries.PURCHASE_ORDERS['upsert_port_acceptance'],
-                    (po_id, port_code, 'rejected', request.actor_name, request.actor_code, request.notes)
-                )
+                if po['status'] in ('sent', 'accepted'):
+                    cur.execute(DatabaseQueries.PURCHASE_ORDERS['update_status'], ('rejected', po_id))
+                    cur.execute(
+                        DatabaseQueries.PURCHASE_ORDERS['insert_audit'],
+                        (po_id, po['status'], 'rejected', 'vendor',
+                         request.actor_name, request.actor_code, f"Port {port_code} rejected")
+                    )
 
-                # If PO is 'accepted', check remaining accepted ports
-                if po['status'] == 'accepted':
-                    cur.execute(DatabaseQueries.PURCHASE_ORDERS['get_remaining_accepted_ports'], (po_id,))
-                    remaining = cur.fetchone()['cnt']
-                    if remaining == 0:
-                        # No accepted ports left — revert to 'sent'
-                        cur.execute(DatabaseQueries.PURCHASE_ORDERS['update_status'], ('sent', po_id))
-                        cur.execute(
-                            DatabaseQueries.PURCHASE_ORDERS['insert_audit'],
-                            (po_id, 'accepted', 'sent', 'vendor', request.actor_name, request.actor_code,
-                             "All ports rejected — PO reverted to received")
-                        )
-                    else:
-                        # Check if all remaining accepted ports already have sent/completed BPLs
-                        cur.execute(DatabaseQueries.BPL['get_sent_bpl_count'], (po_id,))
-                        sent_count = cur.fetchone()['cnt']
-                        if sent_count >= remaining:
-                            # All remaining accepted ports have sent BPLs → re-fulfill
-                            cur.execute(DatabaseQueries.PURCHASE_ORDERS['update_status'], ('fulfilled', po_id))
-                            cur.execute(
-                                DatabaseQueries.PURCHASE_ORDERS['insert_audit'],
-                                (po_id, 'accepted', 'fulfilled', 'system', 'system', 'auto',
-                                 f"Port {port_code} rejected — all remaining accepted ports already sent")
-                            )
-
-                accepted_ports, rejected_ports = _get_port_lists(cur, po_id)
                 conn.commit()
-                logger.info(f"Port {port_code} rejected for PO {po_id} by {request.actor_code}")
+                logger.info(f"PO {po_id} port {port_code} rejected by {request.actor_code}")
                 return {"success": True, "po_id": po_id, "port_code": port_code,
-                        "accepted_ports": accepted_ports, "rejected_ports": rejected_ports}
+                        "accepted_ports": [], "rejected_ports": [port_code]}
 
         except HTTPException:
             raise

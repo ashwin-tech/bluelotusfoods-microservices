@@ -496,13 +496,13 @@ GET_VENDOR_QUOTE_DESTINATIONS = """
 # =====================================================
 CHECK_PO_EXISTS = """
     SELECT id, po_number, status FROM purchase_order
-    WHERE quote_id = %s AND estimate_id = %s AND vendor_id = %s
+    WHERE quote_id = %s AND estimate_id = %s AND vendor_id = %s AND port_code = %s
 """
 
 INSERT_PURCHASE_ORDER = """
     INSERT INTO purchase_order
-        (po_number, quote_id, estimate_id, vendor_id, status, delivery_date_from, delivery_date_to)
-    VALUES (%s, %s, %s, %s, 'sent', %s, %s)
+        (po_number, quote_id, estimate_id, vendor_id, port_code, status, delivery_date_from, delivery_date_to)
+    VALUES (%s, %s, %s, %s, %s, 'sent', %s, %s)
     RETURNING id, po_number, status, created_at
 """
 
@@ -558,11 +558,11 @@ INSERT_PO_AUDIT = """
 
 GET_POS_BY_ESTIMATE = """
     SELECT
-        po.id, po.po_number, po.quote_id, po.estimate_id,
-        po.vendor_id, po.status, po.created_at
+        po.id AS po_id, po.po_number, po.quote_id, po.estimate_id,
+        po.vendor_id, po.port_code, po.status, po.created_at
     FROM purchase_order po
     WHERE po.estimate_id = %s
-    ORDER BY po.created_at DESC
+    ORDER BY po.vendor_id, po.port_code
 """
 
 GET_PO_ITEMS_SUMMARY = """
@@ -655,7 +655,8 @@ GET_FULFILLED_PO_REPORT = """
             END) OVER (PARTITION BY po.id)                          AS po_total_invoice,
             -- SIMP applies to whole consignment if any species needs it
             BOOL_OR(COALESCE(fssa.is_simp_applicable, false))
-                OVER (PARTITION BY po.id)                           AS po_has_simp
+                OVER (PARTITION BY po.id)                           AS po_has_simp,
+            audit.fulfilled_at
         FROM purchase_order po
         JOIN purchase_order_item poi
             ON  poi.po_id       = po.id
@@ -682,10 +683,17 @@ GET_FULFILLED_PO_REPORT = """
             WHERE fish_species_id = bei.fish_species_id
             LIMIT 1
         ) fssa ON true
+        LEFT JOIN LATERAL (
+            SELECT MAX(CASE WHEN to_status = 'fulfilled' THEN created_at END) AS fulfilled_at
+            FROM purchase_order_audit
+            WHERE po_id = po.id
+        ) audit ON true
         WHERE po.status = 'fulfilled'
+          AND po.created_at >= %s
+          AND po.created_at <  %s
     ),
     cleared AS (
-        -- Compute the single PO-level clearing total, then allocate per species by weight %.
+        -- Compute the single PO-level clearing total, then allocate per species by weight share.
         SELECT
             *,
             CASE
@@ -711,7 +719,7 @@ GET_FULFILLED_PO_REPORT = """
         estimate_id, estimate_number, company_id, company_name,
         vendor_code, fish_name, cut_name, grade_name, fish_size, port_code,
         vendor_price_per_kg, fulfilled_weight_kg, fulfilled_weight_lbs,
-        buyer_price_per_lb, margin_per_lb,
+        buyer_price_per_lb, margin_per_lb, fulfilled_at,
         clearing_bracket,
         -- Weight share of this species within the PO
         ROUND((fulfilled_weight_lbs / po_total_lbs * 100)::numeric, 1)
@@ -723,33 +731,13 @@ GET_FULFILLED_PO_REPORT = """
         ROUND((po_total_clearing / po_total_lbs)::numeric, 4)
                                                                     AS clearing_per_lb
     FROM cleared
-    ORDER BY company_name, po_id DESC, fish_name
-"""
-
-GET_PORT_ACCEPTANCE = """
-    SELECT port_code, status FROM purchase_order_port_acceptance
-    WHERE po_id = %s ORDER BY port_code
-"""
-
-UPSERT_PORT_ACCEPTANCE = """
-    INSERT INTO purchase_order_port_acceptance
-        (po_id, port_code, status, actor_name, actor_code, notes)
-    VALUES (%s, %s, %s, %s, %s, %s)
-    ON CONFLICT (po_id, port_code)
-    DO UPDATE SET status = EXCLUDED.status,
-                  actor_name = EXCLUDED.actor_name,
-                  actor_code = EXCLUDED.actor_code
-"""
-
-GET_REMAINING_ACCEPTED_PORTS = """
-    SELECT COUNT(*) AS cnt FROM purchase_order_port_acceptance
-    WHERE po_id = %s AND status = 'accepted'
+    ORDER BY fulfilled_at DESC NULLS LAST, fish_name
 """
 
 GET_VENDOR_POS_BY_WEEK = """
     SELECT
         po.id, po.po_number, po.quote_id, po.estimate_id,
-        po.vendor_id, po.status, po.created_at,
+        po.vendor_id, po.port_code, po.status, po.created_at,
         po.fulfilled_weight_kg, po.fulfilled_weight_lbs,
         be.estimate_number,
         (SELECT COUNT(*) FROM purchase_order_item poi WHERE poi.po_id = po.id) as item_count
@@ -764,7 +752,7 @@ GET_VENDOR_POS_BY_WEEK = """
 GET_VENDOR_POS_ALL = """
     SELECT
         po.id, po.po_number, po.quote_id, po.estimate_id,
-        po.vendor_id, po.status, po.created_at,
+        po.vendor_id, po.port_code, po.status, po.created_at,
         po.fulfilled_weight_kg, po.fulfilled_weight_lbs,
         be.estimate_number,
         (SELECT COUNT(*) FROM purchase_order_item poi WHERE poi.po_id = po.id) as item_count
@@ -814,8 +802,8 @@ GET_COVERED_PO_ITEMS = """
 """
 
 CHECK_PORT_ACCEPTED = """
-    SELECT id FROM purchase_order_port_acceptance
-    WHERE po_id = %s AND port_code = %s AND status = 'accepted'
+    SELECT id FROM purchase_order
+    WHERE id = %s AND port_code = %s AND status = 'accepted'
 """
 
 GET_BPL_BY_PO_PORT = """
@@ -899,19 +887,6 @@ GET_BPL_PIECES_FOR_EMAIL = """
 UPDATE_BPL_STATUS_SENT = """
     UPDATE box_packaging_list SET status = 'sent', updated_at = NOW()
     WHERE po_id = %s AND port_code = %s
-"""
-
-GET_ACCEPTED_PORT_COUNT = """
-    SELECT COUNT(*) AS cnt FROM purchase_order_port_acceptance
-    WHERE po_id = %s AND status = 'accepted'
-"""
-
-GET_SENT_BPL_COUNT = """
-    SELECT COUNT(*) AS cnt
-    FROM box_packaging_list b
-    JOIN purchase_order_port_acceptance p
-      ON b.po_id = p.po_id AND b.port_code = p.port_code
-    WHERE b.po_id = %s AND b.status = 'sent' AND p.status = 'accepted'
 """
 
 GET_PO_CREATED_AT = """
@@ -1087,9 +1062,6 @@ class DatabaseQueries:
         'get_items_summary': GET_PO_ITEMS_SUMMARY,
         'get_header_with_estimate': GET_PO_HEADER_WITH_ESTIMATE,
         'get_items_full': GET_PO_ITEMS_FULL,
-        'get_port_acceptance': GET_PORT_ACCEPTANCE,
-        'upsert_port_acceptance': UPSERT_PORT_ACCEPTANCE,
-        'get_remaining_accepted_ports': GET_REMAINING_ACCEPTED_PORTS,
         'get_vendor_pos_by_week': GET_VENDOR_POS_BY_WEEK,
         'get_vendor_pos_all': GET_VENDOR_POS_ALL,
         'get_created_at': GET_PO_CREATED_AT,
@@ -1119,8 +1091,6 @@ class DatabaseQueries:
         'get_items_for_email': GET_BPL_ITEMS_FOR_EMAIL,
         'get_pieces_for_email': GET_BPL_PIECES_FOR_EMAIL,
         'update_status_sent': UPDATE_BPL_STATUS_SENT,
-        'get_accepted_port_count': GET_ACCEPTED_PORT_COUNT,
-        'get_sent_bpl_count': GET_SENT_BPL_COUNT,
         'update_upload': UPDATE_BPL_UPLOAD,
         'insert_upload': INSERT_BPL_UPLOAD,
     }

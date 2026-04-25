@@ -71,24 +71,63 @@ def format_date(date_str) -> str:
     except:
         return str(date_str)
 
-def group_items_by_fish_cut_grade_port(items: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    """Group items by fish species, cut, grade, size, and port"""
-    grouped = {}
+def group_items_by_fish_cut_grade_port(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Group items by species/cut/grade/size/vendor, merging ports with identical price tiers.
+    Sort: multi-port groups first, then by port string, then fish/cut/grade/size."""
+    from collections import defaultdict
+
+    # Step 1: bucket by species/cut/grade/size/vendor/port
+    by_port_key: Dict[str, list] = defaultdict(list)
     for item in items:
-        fish_size = item.get('fish_size') or 'no-size'
-        key = f"{item['fish_species_id']}-{item['cut_id']}-{item['grade_id']}-{fish_size}-{item['port_code']}"
-        if key not in grouped:
-            grouped[key] = {
-                'common_name': item['common_name'],
-                'scientific_name': item.get('scientific_name', ''),
-                'cut_name': item['cut_name'],
-                'grade_name': item['grade_name'],
-                'fish_size': item.get('fish_size'),
-                'port_code': item['port_code'],
-                'items': []
+        fish_size = item.get('fish_size') or ''
+        vendor_id = item.get('vendor_id', '')
+        k = f"{item['fish_species_id']}|{item['cut_id']}|{item['grade_id']}|{fish_size}|{vendor_id}|{item['port_code']}"
+        by_port_key[k].append(item)
+
+    # Step 2: merge ports whose tier prices are identical
+    display_groups: Dict[str, Any] = {}
+    for port_items in by_port_key.values():
+        first = port_items[0]
+        fish_size = first.get('fish_size') or ''
+        vendor_id = first.get('vendor_id', '')
+        species_key = f"{first['fish_species_id']}|{first['cut_id']}|{first['grade_id']}|{fish_size}|{vendor_id}"
+        price_fp = '~'.join(sorted(
+            f"{float(i.get('fish_price', 0)):.4f}|{float(i.get('margin', 0)):.4f}|"
+            f"{float(i.get('freight_price', 0)):.4f}|{float(i.get('tariff_percent', 0)):.4f}|"
+            f"{float(i.get('clearing_charges', 0)):.4f}|{float(i.get('total_price', 0)):.4f}"
+            for i in port_items
+        ))
+        group_key = f"{species_key}~~{price_fp}"
+        if group_key not in display_groups:
+            display_groups[group_key] = {
+                'common_name': first['common_name'],
+                'scientific_name': first.get('scientific_name', ''),
+                'cut_name': first['cut_name'],
+                'grade_name': first['grade_name'],
+                'fish_size': first.get('fish_size'),
+                'ports': [first['port_code']],
+                'items': port_items,
             }
-        grouped[key]['items'].append(item)
-    return grouped
+        else:
+            display_groups[group_key]['ports'].append(first['port_code'])
+
+    # Sort ports within each group alphabetically
+    for g in display_groups.values():
+        g['ports'].sort()
+
+    # Sort groups: multi-port first → port string → fish → cut → grade → size
+    def _sort_key(kv):
+        g = kv[1]
+        return (
+            -len(g['ports']),
+            ','.join(g['ports']),
+            g['common_name'],
+            g['cut_name'],
+            g['grade_name'],
+            g.get('fish_size') or '',
+        )
+
+    return dict(sorted(display_groups.items(), key=_sort_key))
 
 def format_fish_size(size: str) -> str:
     """Format fish size with lbs+ suffix"""
@@ -233,10 +272,11 @@ def generate_estimate_pdf(estimate_data: Dict[str, Any], items: List[Dict[str, A
     grouped_items = group_items_by_fish_cut_grade_port(items)
     
     # Add grouped items tables
-    for group_key, group_data in sorted(grouped_items.items()):
+    for group_key, group_data in grouped_items.items():
+        ports_label = ', '.join(group_data['ports'])
         # Create info table with fish details
         fish_info_data = [
-            ['Common Name:', group_data['common_name'], 'Scientific Name:', group_data.get('scientific_name', 'N/A'), 'Port:', group_data['port_code']],
+            ['Common Name:', group_data['common_name'], 'Scientific Name:', group_data.get('scientific_name', 'N/A'), 'Port:', ports_label],
             ['Grade/Cut:', f"{esc(group_data['grade_name'])} / {esc(group_data['cut_name'])}", 'Size:', format_fish_size(group_data.get('fish_size')) if group_data.get('fish_size') else 'N/A', '', '']
         ]
         
@@ -507,20 +547,36 @@ def generate_vendor_quote_pdf(quote_data: dict) -> bytes:
         cell_right = ParagraphStyle('SumCellRight', fontSize=9, leading=11, alignment=TA_RIGHT)
         cell_right_bold = ParagraphStyle('SumCellRightBold', fontSize=9, leading=11, alignment=TA_RIGHT, fontName='Helvetica-Bold', textColor=colors.HexColor('#1e40af'))
         
+        # Group destinations by airfreight_per_kg so same-price ports share one section
+        from collections import defaultdict
+        groups = defaultdict(list)
         for dest in destinations:
-            dest_name = dest.get('destination', '')
-            airfreight = float(dest.get('airfreight_per_kg', 0))
-            arrival = dest.get('arrival_date', '')
-            min_wt = dest.get('min_weight', '')
-            max_wt = dest.get('max_weight', '')
-            
-            # Destination sub-header
-            dest_label = f"<b>{dest_name}</b>"
-            if arrival:
-                dest_label += f"  —  Arrival: {arrival}"
-            if min_wt and max_wt:
-                dest_label += f"  |  Weight: {min_wt} – {max_wt} kg"
-            
+            rate = float(dest.get('airfreight_per_kg', 0))
+            groups[rate].append(dest)
+
+        for airfreight, group_dests in groups.items():
+            port_names = ', '.join(d.get('destination', '') for d in group_dests)
+
+            # Build arrival label: group ports by date, format as "PORT1, PORT2: date"
+            date_to_ports = defaultdict(list)
+            for d in group_dests:
+                if d.get('arrival_date'):
+                    date_to_ports[d['arrival_date']].append(d.get('destination', ''))
+            if date_to_ports:
+                arrival_parts = [f"{', '.join(ports)}: {dt}" for dt, ports in date_to_ports.items()]
+                arrival_str = ', '.join(arrival_parts)
+                dest_label = f"<b>Port</b>  :  Arrival Date — {arrival_str}"
+            else:
+                dest_label = f"<b>Port</b>"
+
+            # Weight range note (only if any dest in group has min/max)
+            wt_parts = [
+                f"{d.get('destination')}: {d.get('min_weight')}–{d.get('max_weight')} kg"
+                for d in group_dests if d.get('min_weight') and d.get('max_weight')
+            ]
+            if wt_parts:
+                dest_label += f"  |  Weight: {', '.join(wt_parts)}"
+
             elements.append(Spacer(1, 0.1*inch))
             elements.append(Paragraph(dest_label, ParagraphStyle(
                 'DestSubHeader',
@@ -532,11 +588,11 @@ def generate_vendor_quote_pdf(quote_data: dict) -> bytes:
                 leftIndent=4,
                 rightIndent=4,
             )))
-            
+
             # Table: Fish | Cut | Grade | Wt Range | Airfreight/kg | Price/kg | Total/kg
             sum_header = ['Fish', 'Cut', 'Grade', 'Wt/Fish (kg)', 'Airfreight/kg', 'Price/kg', 'Total/kg']
             sum_data = [sum_header]
-            
+
             for size in sizes:
                 price_per_kg = float(size.get('price_per_kg', 0))
                 total_per_kg = airfreight + price_per_kg
@@ -549,7 +605,7 @@ def generate_vendor_quote_pdf(quote_data: dict) -> bytes:
                     Paragraph(f"${price_per_kg:.2f}", cell_right),
                     Paragraph(f"${total_per_kg:.2f}", cell_right_bold),
                 ])
-            
+
             sum_table = Table(sum_data, colWidths=[1.6*inch, 0.8*inch, 0.8*inch, 0.9*inch, 1*inch, 0.9*inch, 0.9*inch], repeatRows=1)
             sum_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0A3D5C')),
