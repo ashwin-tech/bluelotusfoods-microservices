@@ -36,6 +36,28 @@ GET_VENDOR_CODE = """
     SELECT code FROM vendors WHERE id = %s
 """
 
+GET_ALL_VENDORS = """
+    SELECT id, code, name, contact_email, country, active, is_email_enabled
+    FROM vendors
+    ORDER BY name
+"""
+
+INSERT_VENDOR = """
+    INSERT INTO vendors (code, name, contact_email, country, active, is_email_enabled)
+    VALUES (%s, %s, %s, %s, TRUE, TRUE)
+    RETURNING id, code, name, contact_email, country, active, is_email_enabled
+"""
+
+UPDATE_VENDOR = """
+    UPDATE vendors SET code=%s, name=%s, contact_email=%s, country=%s
+    WHERE id=%s
+    RETURNING id, code, name, contact_email, country, active, is_email_enabled
+"""
+
+DEACTIVATE_VENDOR = """
+    UPDATE vendors SET active=FALSE WHERE id=%s RETURNING id
+"""
+
 # =====================================================
 # DICTIONARY QUERIES
 # =====================================================
@@ -51,22 +73,98 @@ GET_DICTIONARY_BY_CODE = """
     WHERE category = 'DESTINATION' AND code = %s AND active = TRUE
 """
 
+INSERT_DICTIONARY = """
+    INSERT INTO dictionary (category, code, name, description, active)
+    VALUES (%s, %s, %s, %s, TRUE)
+    RETURNING id, category, code, name, description
+"""
+
 # =====================================================
 # FISH QUERIES
 # =====================================================
 GET_FISH_TYPES = """
-    SELECT common_name, scientific_name
+    SELECT id, common_name, scientific_name
     FROM fish_species
     WHERE is_active = TRUE
     ORDER BY id
 """
 
 GET_FISH_CUTS = """
-    SELECT name FROM fish_cut ORDER BY name
+    SELECT id, code, name FROM fish_cut ORDER BY name
 """
 
 GET_FISH_GRADES = """
-    SELECT name FROM fish_grade ORDER BY name
+    SELECT id, code, name FROM fish_grade ORDER BY name
+"""
+
+INSERT_FISH_SPECIES = """
+    INSERT INTO fish_species (common_name, scientific_name, is_active)
+    VALUES (%s, %s, TRUE)
+    RETURNING id, common_name, scientific_name
+"""
+
+UPDATE_FISH_SPECIES = """
+    UPDATE fish_species SET common_name=%s, scientific_name=%s
+    WHERE id=%s
+    RETURNING id, common_name, scientific_name
+"""
+
+DEACTIVATE_FISH_SPECIES = """
+    UPDATE fish_species SET is_active=FALSE WHERE id=%s RETURNING id
+"""
+
+DELETE_FISH_CUT = "DELETE FROM fish_cut WHERE id=%s"
+DELETE_FISH_GRADE = "DELETE FROM fish_grade WHERE id=%s"
+
+INSERT_FISH_CUT = """
+    INSERT INTO fish_cut (code, name)
+    VALUES (%s, %s)
+    RETURNING id, code, name
+"""
+
+UPDATE_FISH_CUT = """
+    UPDATE fish_cut SET code=%s, name=%s
+    WHERE id=%s
+    RETURNING id, code, name
+"""
+
+INSERT_FISH_GRADE = """
+    INSERT INTO fish_grade (code, name)
+    VALUES (%s, %s)
+    RETURNING id, code, name
+"""
+
+UPDATE_FISH_GRADE = """
+    UPDATE fish_grade SET code=%s, name=%s
+    WHERE id=%s
+    RETURNING id, code, name
+"""
+
+INSERT_FISH_SIZE = """
+    INSERT INTO fish_size (fish_species_id, cut_id, kg_label, kg_max, lbs_label, lbs_max, sort_order, active)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+    RETURNING id, fish_species_id, cut_id, kg_label, kg_max, lbs_label, lbs_max, sort_order, active
+"""
+
+UPDATE_FISH_SIZE = """
+    UPDATE fish_size SET fish_species_id=%s, cut_id=%s, kg_label=%s, kg_max=%s,
+        lbs_label=%s, lbs_max=%s, sort_order=%s
+    WHERE id=%s
+    RETURNING id, fish_species_id, cut_id, kg_label, kg_max, lbs_label, lbs_max, sort_order, active
+"""
+
+DEACTIVATE_FISH_SIZE = """
+    UPDATE fish_size SET active=FALSE WHERE id=%s RETURNING id
+"""
+
+UPDATE_DICTIONARY = """
+    UPDATE dictionary SET code=%s, name=%s, description=%s
+    WHERE id=%s
+    RETURNING id, category, code, name, description
+"""
+
+DEACTIVATE_DICTIONARY = """
+    UPDATE dictionary SET active=FALSE WHERE id=%s RETURNING id
 """
 
 GET_FISH_BY_NAME = """
@@ -986,6 +1084,10 @@ class DatabaseQueries:
         'get_by_code': GET_VENDOR_BY_CODE,
         'get_by_name': GET_VENDOR_BY_NAME,
         'get_code': GET_VENDOR_CODE,
+        'get_all': GET_ALL_VENDORS,
+        'insert': INSERT_VENDOR,
+        'update': UPDATE_VENDOR,
+        'deactivate': DEACTIVATE_VENDOR,
     }
 
     BUYER_PRICING = {
@@ -999,6 +1101,9 @@ class DatabaseQueries:
     DICTIONARY = {
         'get_by_category': GET_DICTIONARY_BY_CATEGORY,
         'get_by_code': GET_DICTIONARY_BY_CODE,
+        'insert': INSERT_DICTIONARY,
+        'update': UPDATE_DICTIONARY,
+        'deactivate': DEACTIVATE_DICTIONARY,
     }
 
     FISH = {
@@ -1008,6 +1113,18 @@ class DatabaseQueries:
         'get_by_name': GET_FISH_BY_NAME,
         'get_cut_by_name': GET_CUT_BY_NAME,
         'get_grade_by_name': GET_GRADE_BY_NAME,
+        'insert_species': INSERT_FISH_SPECIES,
+        'update_species': UPDATE_FISH_SPECIES,
+        'deactivate_species': DEACTIVATE_FISH_SPECIES,
+        'insert_cut': INSERT_FISH_CUT,
+        'update_cut': UPDATE_FISH_CUT,
+        'delete_cut': DELETE_FISH_CUT,
+        'insert_grade': INSERT_FISH_GRADE,
+        'update_grade': UPDATE_FISH_GRADE,
+        'delete_grade': DELETE_FISH_GRADE,
+        'insert_size': INSERT_FISH_SIZE,
+        'update_size': UPDATE_FISH_SIZE,
+        'deactivate_size': DEACTIVATE_FISH_SIZE,
     }
 
     QUOTES = {

@@ -13,6 +13,68 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class VendorIn(BaseModel):
+    code: str
+    name: str
+    contact_email: str
+    country: str
+
+
+@router.get("/")
+def get_all_vendors():
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(DatabaseQueries.VENDORS['get_all'])
+            return cur.fetchall()
+
+
+@router.post("/")
+def add_vendor(body: VendorIn):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            try:
+                cur.execute(DatabaseQueries.VENDORS['insert'],
+                            (body.code.strip().upper(), body.name.strip(),
+                             body.contact_email.strip(), body.country.strip()))
+                row = cur.fetchone()
+                conn.commit()
+                return row
+            except Exception as e:
+                conn.rollback()
+                raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/{vendor_id}")
+def deactivate_vendor(vendor_id: int):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(DatabaseQueries.VENDORS['deactivate'], (vendor_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Vendor not found")
+            conn.commit()
+            return {"success": True}
+
+
+@router.put("/{vendor_id}")
+def update_vendor(vendor_id: int, body: VendorIn):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            try:
+                cur.execute(DatabaseQueries.VENDORS['update'],
+                            (body.code.strip().upper(), body.name.strip(),
+                             body.contact_email.strip(), body.country.strip(), vendor_id))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Vendor not found")
+                conn.commit()
+                return row
+            except HTTPException:
+                raise
+            except Exception as e:
+                conn.rollback()
+                raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/purchase-orders/{po_id}/items")
 def get_purchase_order_items(po_id: int):
     """Get line items for a specific purchase order."""
