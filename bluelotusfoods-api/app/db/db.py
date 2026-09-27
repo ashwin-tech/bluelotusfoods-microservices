@@ -8,7 +8,7 @@ db_pool = None
 def init_db_pool():
     global db_pool
     if db_pool is None:
-        db_pool = pool.SimpleConnectionPool(
+        db_pool = pool.ThreadedConnectionPool(
             minconn=1,
             maxconn=10,
             dbname=settings.db_name,
