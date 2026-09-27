@@ -271,22 +271,34 @@ def generate_estimate_pdf(estimate_data: Dict[str, Any], items: List[Dict[str, A
     # Group items
     grouped_items = group_items_by_fish_cut_grade_port(items)
     
+    # Wrapping style for the port list so long lists flow onto extra lines
+    # instead of overflowing the banner
+    banner_ports_style = ParagraphStyle(
+        'BannerPorts',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=10,
+        leading=12,
+        textColor=colors.white,
+    )
+
     # Add grouped items tables
     for group_key, group_data in grouped_items.items():
-        ports_label = ', '.join(group_data['ports'])
-        # Create info table with fish details
+        ports_label = Paragraph(esc(', '.join(group_data['ports'])), banner_ports_style)
+        # Create info table with fish details; Port gets its own full-width row
         fish_info_data = [
-            ['Common Name:', group_data['common_name'], 'Scientific Name:', group_data.get('scientific_name', 'N/A'), 'Port:', ports_label],
-            ['Grade/Cut:', f"{esc(group_data['grade_name'])} / {esc(group_data['cut_name'])}", 'Size:', format_fish_size(group_data.get('fish_size')) if group_data.get('fish_size') else 'N/A', '', '']
+            ['Common Name:', group_data['common_name'], 'Scientific Name:', group_data.get('scientific_name', 'N/A')],
+            ['Grade/Cut:', f"{esc(group_data['grade_name'])} / {esc(group_data['cut_name'])}", 'Size:', format_fish_size(group_data.get('fish_size')) if group_data.get('fish_size') else 'N/A'],
+            ['Port:', ports_label, '', ''],
         ]
-        
-        fish_info_table = Table(fish_info_data, colWidths=[1.2*inch, 1.8*inch, 1.3*inch, 1.8*inch, 0.7*inch, 0.7*inch])
+
+        fish_info_table = Table(fish_info_data, colWidths=[1.2*inch, 1.8*inch, 1.3*inch, 3.2*inch])
         fish_info_table.setStyle(TableStyle([
+            ('SPAN', (1, 2), (3, 2)),
             ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#0A3D5C')),
             ('TEXTCOLOR', (0, 0), (-1, -1), colors.white),
             ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
             ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
-            ('FONTNAME', (4, 0), (4, -1), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, -1), 10),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('TOPPADDING', (0, 0), (-1, -1), 4),
